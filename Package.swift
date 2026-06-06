@@ -1,26 +1,48 @@
 // swift-tools-version: 6.2
-// The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
-    name: "OfflineQuranRecognition",
+    name: "QuranRecognitionKit",
+    defaultLocalization: "en",
+    platforms: [
+        .iOS(.v17),
+        .macOS(.v14)
+    ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
-            name: "OfflineQuranRecognition",
-            targets: ["OfflineQuranRecognition"]
+            name: "QuranRecognitionKit",
+            targets: ["QuranRecognitionKit"]
         ),
+        .executable(
+            name: "QuranRecognitionManualHarness",
+            targets: ["QuranRecognitionManualHarness"]
+        )
+    ],
+    dependencies: [
+        .package(
+            url: "https://github.com/microsoft/onnxruntime-swift-package-manager.git",
+            from: "1.24.0"
+        )
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "OfflineQuranRecognition"
+            name: "QuranRecognitionKit",
+            dependencies: [
+                .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
+            ],
+            resources: [
+                .process("Resources/vocab.json"),
+                .process("Resources/quran.json")
+            ]
+        ),
+        .executableTarget(
+            name: "QuranRecognitionManualHarness",
+            dependencies: ["QuranRecognitionKit"]
         ),
         .testTarget(
-            name: "OfflineQuranRecognitionTests",
-            dependencies: ["OfflineQuranRecognition"]
-        ),
+            name: "QuranRecognitionKitTests",
+            dependencies: ["QuranRecognitionKit"]
+        )
     ]
 )
