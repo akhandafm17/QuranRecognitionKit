@@ -243,19 +243,3 @@ Current tests cover:
 - Recognition session start/stop lifecycle with a mock capture source.
 
 The manual harness is the integration path for real model + audio validation.
-
-## Attribution And License Review
-
-This package uses `offline-tarteel` as a reference implementation:
-
-- Reference repo: https://github.com/yazinsai/offline-tarteel
-- Referenced resources: `data/vocab.json`, `data/quran.json`
-- Referenced pipeline notes: 16 kHz mono audio, 80-bin NeMo mel features, ONNX CTC logprobs, greedy CTC decode, fuzzy Quran verse matching.
-
-Publication caveats:
-
-- The checked `offline-tarteel` clone did not include a root `LICENSE` file. Review and obtain permission or replace resources before public distribution.
-- ONNX Runtime Swift Package Manager is MIT-licensed: https://github.com/microsoft/onnxruntime-swift-package-manager
-- The NVIDIA FastConformer model referenced by `offline-tarteel` is listed there as CC-BY-4.0. Verify the model license and attribution requirements for the exact ONNX artifact you distribute.
-- Quran text/source licensing must be reviewed for the bundled `quran.json` before publishing.
-- Do not publish the package with a model binary unless its redistribution terms are confirmed.
