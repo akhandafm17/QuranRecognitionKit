@@ -15,6 +15,16 @@ The package is a Swift implementation of the `offline-tarteel` pipeline shape:
 
 The SDK does not bundle the ONNX model. It bundles only `vocab.json` and `quran.json` through `Bundle.module`.
 
+## Requirements
+
+- Swift 6.2 or newer.
+- iOS 17 or newer.
+- Xcode with a Swift 6.2 toolchain or newer for app integration.
+- A local ONNX FastConformer CTC model compatible with the bundled vocabulary.
+- Microphone permission if you use live recognition through `startListening`.
+
+QuranRecognitionKit depends on Microsoft's `onnxruntime-swift-package-manager` package. Swift Package Manager resolves this dependency automatically.
+
 ## Installation
 
 ### Local Package
@@ -35,13 +45,33 @@ import QuranRecognitionKit
 
 ### GitHub Package
 
-Consumers can add:
+In Xcode:
+
+1. Choose `File > Add Package Dependencies`.
+2. Enter `https://github.com/akhandafm17/QuranRecognitionKit.git`.
+3. Select version `0.1.2` or newer.
+4. Add the `QuranRecognitionKit` product to the app target.
+
+In a Swift package manifest:
 
 ```swift
 .package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.2")
 ```
 
 The package requires iOS 17 or newer.
+
+## App Permissions
+
+Live recognition uses the device microphone. Add a microphone usage description to the host app's `Info.plist`:
+
+```xml
+<key>NSMicrophoneUsageDescription</key>
+<string>Microphone access is used to recognize Quran recitation on device.</string>
+```
+
+The SDK configures an `AVAudioSession` for recording when `startListening` is called. If your app also plays audio, coordinate calls to your own audio session setup with recognition start and stop.
+
+`ModelDownloader` uses `URLSession`. If your model URL is not HTTPS, configure App Transport Security in the host app.
 
 ## Model Setup
 
@@ -52,21 +82,32 @@ let recognizer = QuranRecognizer(modelURL: modelURL)
 try await recognizer.prepare()
 ```
 
-The model is intentionally not included in the Swift package because it is large. The Dhikr Unlock app currently downloads `FastConformerQuranCTC.onnx.zip`, verifies SHA-256, extracts `FastConformerQuranCTC.onnx`, and passes that file URL to the SDK.
+The model is intentionally not included in the Swift package because it is large. The host app must download, ship, or otherwise provide a compatible `.onnx` file and pass its local file URL to `QuranRecognizer`.
 
-Known local checksums for the current app artifact:
+The expected audio input for direct recognition is 16 kHz mono `Float` PCM samples. Live recognition captures microphone input and converts it internally before inference.
 
-```text
-FastConformerQuranCTC.onnx.zip
-624de98303964a97880070134311c24d3e42f26ddd9d54efe9219d7ad429befd
+The model must produce CTC logits for the same vocabulary bundled in `vocab.json`. If the model vocabulary size does not match, `prepare()` throws `RecognitionError.vocabModelMismatch`.
 
-FastConformerQuranCTC.onnx
-7e7f9aaccbf0f7d12104ebfee9a99625195454a359821139a777f389ec928b50
-```
+If your app downloads a compressed model archive, verify the archive, extract the `.onnx` file, and pass the extracted model URL to the SDK.
 
 If you use `ModelDownloader`, an expected SHA-256 is required.
 
+```swift
+let downloader = ModelDownloader()
+let localModelURL = try await downloader.download(
+    from: modelArchiveURL,
+    expectedSHA256: expectedChecksum,
+    destinationURL: destinationURL
+) { progress in
+    print("Download progress: \(progress)")
+}
+```
+
+`ModelDownloader` verifies and stores bytes. It does not unzip archives; extract compressed model files in the host app before passing the ONNX URL to `QuranRecognizer`.
+
 ## Usage
+
+### Live Recognition
 
 ```swift
 import QuranRecognitionKit
@@ -116,6 +157,21 @@ session.stop()
 
 Pass the current surah number as `surahHint` when recognition starts from a Quran reader. Discovery will prefer that surah first, which improves startup speed and reduces false jumps for the common case where the user recites from the displayed surah.
 
+### One-Shot Recognition
+
+Use `recognize(samples:surahHint:)` when you already have 16 kHz mono `Float` samples:
+
+```swift
+let recognizer = QuranRecognizer(modelURL: modelURL)
+try await recognizer.prepare()
+
+if let verse = try await recognizer.recognize(samples: samples, surahHint: 1) {
+    print("\(verse.surahNumber):\(verse.verseNumber)")
+}
+```
+
+### Manual Harness
+
 You can also run a non-streaming manual check with:
 
 ```bash
@@ -123,6 +179,33 @@ swift run QuranRecognitionManualHarness /path/to/FastConformerQuranCTC.onnx /pat
 ```
 
 ## Public API
+
+### Recognizer
+
+```swift
+public final class QuranRecognizer: @unchecked Sendable {
+    public init(modelURL: URL, configuration: Configuration = Configuration())
+
+    public func prepare() async throws
+    public func startListening(surahHint: Int? = nil) throws -> QuranRecognitionSession
+    public func recognize(samples: [Float], surahHint: Int? = nil) async throws -> RecognizedVerse?
+}
+```
+
+Call `prepare()` once before recognition. It loads bundled resources, creates the ONNX Runtime session, and validates the model against the bundled vocabulary.
+
+### Session
+
+```swift
+public final class QuranRecognitionSession: @unchecked Sendable {
+    public let events: AsyncStream<RecognitionEvent>
+    public func stop()
+}
+```
+
+`events` yields microphone quality updates, decoded transcripts, verse detections, state changes, and errors. Call `stop()` when the user leaves the recognition flow or disables listening.
+
+### Events And Results
 
 ```swift
 public enum RecognitionState: Sendable, Equatable {
@@ -133,7 +216,7 @@ public enum RecognitionState: Sendable, Equatable {
     case stopped
 }
 
-public struct RecognizedVerse: Sendable {
+public struct RecognizedVerse: Sendable, Equatable {
     public let surahNumber: Int
     public let verseNumber: Int
     public let ayahEnd: Int?
@@ -148,7 +231,7 @@ public enum AudioInputStatus: Sendable, Equatable {
     case clipped
 }
 
-public struct AudioInputQuality: Sendable {
+public struct AudioInputQuality: Sendable, Equatable {
     public let rms: Float
     public let peak: Float
     public let rmsDecibels: Float
@@ -158,12 +241,52 @@ public struct AudioInputQuality: Sendable {
     public let isSpeechLikely: Bool
 }
 
-public enum RecognitionEvent: Sendable {
+public enum RecognitionEvent: Sendable, Equatable {
     case audioInput(AudioInputQuality)
     case transcription(String)
     case verseDetected(RecognizedVerse)
     case stateChanged(RecognitionState)
     case error(RecognitionError)
+}
+```
+
+`ayahEnd` is set when the matcher identifies a span that covers multiple ayahs. For single-ayah detections it is `nil`.
+
+### Model Downloader
+
+```swift
+public actor ModelDownloader {
+    public init()
+
+    public func download(
+        from sourceURL: URL,
+        expectedSHA256: String,
+        destinationURL: URL,
+        progress: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> URL
+}
+```
+
+`ModelDownloader` streams a remote file to disk and verifies SHA-256 before replacing the destination file.
+
+### Errors
+
+```swift
+public enum RecognitionError: Error, Sendable, Equatable {
+    case resourceMissing(String)
+    case resourceCorrupt(String)
+    case modelMissing(String)
+    case modelCorrupt(String)
+    case vocabModelMismatch(expected: Int, actual: Int)
+    case microphonePermissionDenied
+    case microphoneUnavailable(String)
+    case unsupportedPlatform
+    case invalidAudioSampleRate(expected: Double, actual: Double)
+    case inferenceFailed(String)
+    case downloadFailed(String)
+    case downloadChecksumMismatch(expected: String, actual: String)
+    case notPrepared
+    case alreadyStopped
 }
 ```
 
@@ -207,20 +330,50 @@ The SDK avoids main-thread inference and audio processing:
 - Verse matching uses an evidence index and bounded span search instead of scanning every possible span.
 - Tracking mode searches locally around the current verse before returning to global discovery.
 
-Measured in this implementation pass:
+Current validation:
 
 - `swift test` passes on macOS arm64 with 33 tests.
 - The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
-- App-side iOS generic builds passed with this local package integrated.
+- Generic iOS package builds pass with `xcodebuild -scheme QuranRecognitionKit-Package -destination 'generic/platform=iOS' build`.
+- App-side iOS generic builds passed with this package integrated.
 
-Known bottlenecks to profile before release:
+For release profiling and maintainer checks, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- ONNX Runtime CPU latency on simulator and a physical iPhone.
-- Mel spectrogram allocation volume for long-running streaming sessions.
-- Microphone conversion stability during long continuous sessions.
-- Real-world recitation quality across devices, rooms, reciters, and microphone positions.
+## Troubleshooting
 
-Do not claim perfect performance. Record CPU, memory, and latency on at least one simulator and one physical iPhone before publishing release claims.
+### `RecognitionError.notPrepared`
+
+Call `try await recognizer.prepare()` before `startListening` or `recognize(samples:)`.
+
+### `RecognitionError.modelMissing` Or `modelCorrupt`
+
+Verify the local model URL points to an existing, non-empty `.onnx` file. If you download a compressed archive, extract the ONNX file before passing it to `QuranRecognizer`.
+
+### `RecognitionError.vocabModelMismatch`
+
+The ONNX model output vocabulary does not match the bundled `vocab.json`. Use a model exported for the same tokenizer/vocabulary as this SDK.
+
+### Microphone Permission Errors
+
+Make sure the host app includes `NSMicrophoneUsageDescription`. On device, also check iOS Settings if the user previously denied microphone access.
+
+### No Verse Is Detected
+
+Check these first:
+
+- The model URL is correct and `prepare()` succeeded.
+- The device microphone is receiving clear speech.
+- The app is not feeding silence, clipped audio, or the wrong sample rate to one-shot recognition.
+- `surahHint` matches the current reader context when the user is likely reciting the displayed surah.
+- `debugLogging: true` is enabled while diagnosing recognition quality.
+
+### Xcode Cannot Find The Package Product
+
+In the host app, remove and re-add the package dependency, then choose `File > Packages > Reset Package Caches`. Confirm the app target links the `QuranRecognitionKit` product.
+
+### Swift Package Index Still Shows Old Compatibility
+
+Swift Package Index and shields.io cache build and badge results. After pushing a fix or tag, wait for SPI to rescan the package and rebuild the compatibility matrix.
 
 ## Tests
 
