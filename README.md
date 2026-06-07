@@ -1,5 +1,8 @@
 # QuranRecognitionKit
 
+[![Swift versions](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fakhandafm17%2FQuranRecognitionKit%2Fbadge%3Ftype%3Dswift-versions)](https://swiftpackageindex.com/akhandafm17/QuranRecognitionKit)
+[![Platforms](https://img.shields.io/endpoint?url=https%3A%2F%2Fswiftpackageindex.com%2Fapi%2Fpackages%2Fakhandafm17%2FQuranRecognitionKit%2Fbadge%3Ftype%3Dplatforms)](https://swiftpackageindex.com/akhandafm17/QuranRecognitionKit)
+
 Native Swift SDK for offline Quran verse recognition on iOS.
 
 The package is a Swift implementation of the `offline-tarteel` pipeline shape:
@@ -30,12 +33,12 @@ Then import it:
 import QuranRecognitionKit
 ```
 
-### Future GitHub Package
+### GitHub Package
 
-After publishing, consumers can add:
+Consumers can add:
 
 ```swift
-.package(url: "https://github.com/<owner>/QuranRecognitionKit.git", from: "0.1.0")
+.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.0")
 ```
 
 The package requires iOS 17 or newer.
