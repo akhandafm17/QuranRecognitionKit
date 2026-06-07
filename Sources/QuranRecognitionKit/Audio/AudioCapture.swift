@@ -8,27 +8,39 @@ protocol AudioCapturing: AnyObject, Sendable {
 
 public final class AudioCapture: AudioCapturing, @unchecked Sendable {
     public let sampleRate: Double
+    private let debugLogging: Bool
     private var audioEngine: AVAudioEngine?
 
-    public init(sampleRate: Double = 16_000) {
+    public init(sampleRate: Double = 16_000, debugLogging: Bool = false) {
         self.sampleRate = sampleRate
+        self.debugLogging = debugLogging
     }
 
     public func start(onSamples: @escaping @Sendable ([Float]) -> Void) throws {
         #if os(iOS)
+        debugLog("start() requested")
         try ensureMicrophonePermission()
+        stopEngine()
 
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.record, mode: .measurement)
-            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            try configureAudioSession(session, mode: .measurement)
+            debugLog("audio session active category=playAndRecord mode=measurement")
         } catch {
-            throw RecognitionError.microphoneUnavailable(error.localizedDescription)
+            debugLog("measurement audio session failed error=\(error), retrying default mode")
+            do {
+                try configureAudioSession(session, mode: .default)
+                debugLog("audio session active category=playAndRecord mode=default")
+            } catch {
+                debugLog("audio session failed error=\(error)")
+                throw RecognitionError.microphoneUnavailable(error.localizedDescription)
+            }
         }
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
+        debugLog("input format sampleRate=\(inputFormat.sampleRate) channels=\(inputFormat.channelCount)")
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -51,7 +63,13 @@ public final class AudioCapture: AudioCapturing, @unchecked Sendable {
             }
 
             var conversionError: NSError?
+            var didProvideBuffer = false
             let status = converter.convert(to: converted, error: &conversionError) { _, outputStatus in
+                guard !didProvideBuffer else {
+                    outputStatus.pointee = .noDataNow
+                    return nil
+                }
+                didProvideBuffer = true
                 outputStatus.pointee = .haveData
                 return buffer
             }
@@ -74,8 +92,10 @@ public final class AudioCapture: AudioCapturing, @unchecked Sendable {
         do {
             try engine.start()
             audioEngine = engine
+            debugLog("audio engine started")
         } catch {
             inputNode.removeTap(onBus: 0)
+            debugLog("audio engine failed error=\(error)")
             throw RecognitionError.microphoneUnavailable(error.localizedDescription)
         }
         #else
@@ -85,23 +105,45 @@ public final class AudioCapture: AudioCapturing, @unchecked Sendable {
 
     public func stop() {
         #if os(iOS)
-        audioEngine?.inputNode.removeTap(onBus: 0)
-        audioEngine?.stop()
-        audioEngine = nil
+        debugLog("stop()")
+        stopEngine()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
     }
 
     #if os(iOS)
+    private func configureAudioSession(
+        _ session: AVAudioSession,
+        mode: AVAudioSession.Mode
+    ) throws {
+        try session.setCategory(
+            .playAndRecord,
+            mode: mode,
+            options: [.allowBluetooth, .defaultToSpeaker]
+        )
+        try session.setPreferredSampleRate(sampleRate)
+        try session.setPreferredIOBufferDuration(0.02)
+        try session.setActive(true, options: .notifyOthersOnDeactivation)
+    }
+
+    private func stopEngine() {
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+    }
+
     private func ensureMicrophonePermission() throws {
         let session = AVAudioSession.sharedInstance()
 
         switch session.recordPermission {
         case .granted:
+            debugLog("microphone permission already granted")
             return
         case .denied:
+            debugLog("microphone permission denied")
             throw RecognitionError.microphonePermissionDenied
         case .undetermined:
+            debugLog("requesting microphone permission")
             let semaphore = DispatchSemaphore(value: 0)
             var granted = false
             session.requestRecordPermission { allowed in
@@ -109,10 +151,16 @@ public final class AudioCapture: AudioCapturing, @unchecked Sendable {
                 semaphore.signal()
             }
             semaphore.wait()
+            debugLog("microphone permission response granted=\(granted)")
             guard granted else { throw RecognitionError.microphonePermissionDenied }
         @unknown default:
             throw RecognitionError.microphonePermissionDenied
         }
     }
     #endif
+
+    private func debugLog(_ message: String) {
+        guard debugLogging else { return }
+        print("[QuranRecognitionKit.AudioCapture] \(message)")
+    }
 }

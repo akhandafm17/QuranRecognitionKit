@@ -8,6 +8,41 @@ public enum RecognitionState: Sendable, Equatable {
     case stopped
 }
 
+public enum AudioInputStatus: Sendable, Equatable {
+    case silence
+    case tooLittleSpeech
+    case speech
+    case clipped
+}
+
+public struct AudioInputQuality: Sendable, Equatable {
+    public let rms: Float
+    public let peak: Float
+    public let rmsDecibels: Float
+    public let speechFrameRatio: Double
+    public let windowSeconds: Double
+    public let status: AudioInputStatus
+    public let isSpeechLikely: Bool
+
+    public init(
+        rms: Float,
+        peak: Float,
+        rmsDecibels: Float,
+        speechFrameRatio: Double,
+        windowSeconds: Double,
+        status: AudioInputStatus,
+        isSpeechLikely: Bool
+    ) {
+        self.rms = rms
+        self.peak = peak
+        self.rmsDecibels = rmsDecibels
+        self.speechFrameRatio = speechFrameRatio
+        self.windowSeconds = windowSeconds
+        self.status = status
+        self.isSpeechLikely = isSpeechLikely
+    }
+}
+
 public enum RecognitionError: Error, Sendable, Equatable, CustomStringConvertible {
     case resourceMissing(String)
     case resourceCorrupt(String)
@@ -59,6 +94,7 @@ public enum RecognitionError: Error, Sendable, Equatable, CustomStringConvertibl
 }
 
 public enum RecognitionEvent: Sendable, Equatable {
+    case audioInput(AudioInputQuality)
     case transcription(String)
     case verseDetected(RecognizedVerse)
     case stateChanged(RecognitionState)

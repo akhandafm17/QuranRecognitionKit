@@ -5,8 +5,15 @@ enum TrackingMode: Sendable, Equatable {
     case tracking
 }
 
+private enum LowConfidenceContinuationDecision {
+    case accepted(RecognizedVerse)
+    case pending
+    case rejected
+}
+
 final class RecitationTracker: @unchecked Sendable {
     private let matchingEngine: QuranVerseMatchingEngine
+    private let debugLogging: Bool
 
     private(set) var mode: TrackingMode = .discovery
     private(set) var currentSurah: Int?
@@ -19,15 +26,37 @@ final class RecitationTracker: @unchecked Sendable {
     private var pendingSurah: Int?
     private var pendingVerse: Int?
     private var consecutiveCount = 0
+    private var pendingLowConfidenceSurah: Int?
+    private var pendingLowConfidenceVerse: Int?
+    private var consecutiveLowConfidenceContinuationCount = 0
+    private var missedTrackingCount = 0
+    private var lowInformationTrackingCount = 0
+    private var completedSurahBeforeDiscovery: Int?
+    private var recoverySurah: Int?
+    private var recoveryMinimumVerse: Int?
 
     private let requiredConsecutiveDiscovery = 2
     private let requiredConsecutiveJump = 2
+    private let hintedDiscoveryThreshold = 0.58
+    private let hintedImmediateDiscoveryThreshold = 0.60
+    private let postCompletionDiscoveryThreshold = 0.60
+    private let postCompletionOpeningImmediateThreshold = 0.80
+    private let immediateDiscoveryThreshold = 0.85
+    private let immediateContinuationThreshold = 0.55
+    private let lowConfidenceShortVerseContinuationThreshold = 0.45
+    private let requiredLowConfidenceShortVerseContinuations = 2
+    private let maximumWordsForLowConfidenceShortVerse = 2
+    private let minimumLowConfidenceContinuationCharacters = 4
     private let autoAdvanceCoverage = 0.80
     private let jumpThreshold = 0.85
+    private let maximumMissedTrackingCount = 4
+    private let maximumMissedTrackingCountAfterCompletedSurah = 2
+    private let maximumLowInformationTrackingCountNearSurahEnd = 6
 
-    init(matchingEngine: QuranVerseMatchingEngine, surahHint: Int? = nil) {
+    init(matchingEngine: QuranVerseMatchingEngine, surahHint: Int? = nil, debugLogging: Bool = false) {
         self.matchingEngine = matchingEngine
         self.surahHint = surahHint
+        self.debugLogging = debugLogging
     }
 
     func reset() {
@@ -39,10 +68,17 @@ final class RecitationTracker: @unchecked Sendable {
         pendingSurah = nil
         pendingVerse = nil
         consecutiveCount = 0
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
+        completedSurahBeforeDiscovery = nil
+        recoverySurah = nil
+        recoveryMinimumVerse = nil
         surahHint = nil
     }
 
     func processTranscription(_ transcription: String) -> RecognizedVerse? {
+        debugLog("process mode=\(mode) hint=\(surahHint.map(String.init) ?? "nil") completedSurah=\(completedSurahBeforeDiscovery.map(String.init) ?? "nil") text='\(transcription)'")
         let match: QuranVerseMatchingEngine.VerseMatchCandidate?
 
         switch mode {
@@ -51,7 +87,10 @@ final class RecitationTracker: @unchecked Sendable {
                 transcription: transcription,
                 currentSurah: currentSurah,
                 currentVerse: currentVerse,
-                surahHint: surahHint
+                surahHint: surahHint,
+                minimumScore: discoveryAcceptanceThreshold,
+                minimumVerseInSurahHint: minimumVerseInSurahHint,
+                exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch
             )
         case .tracking:
             if let currentSurah, let currentVerse {
@@ -65,18 +104,44 @@ final class RecitationTracker: @unchecked Sendable {
             }
         }
 
-        guard let match else { return nil }
-
         switch mode {
         case .discovery:
-            return handleDiscoveryMatch(match)
+            guard let match else {
+                debugLog("no candidate matched")
+                return nil
+            }
+            debugLog(
+                "candidate \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score)) ayahEnd=\(match.ayahEnd.map(String.init) ?? "nil")"
+            )
+            return handleDiscoveryMatch(match, transcription: transcription)
         case .tracking:
+            guard let match else {
+                debugLog("no scoped candidate matched")
+                return handleTrackingMiss(transcription: transcription)
+            }
+            debugLog(
+                "candidate \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score)) ayahEnd=\(match.ayahEnd.map(String.init) ?? "nil")"
+            )
             return handleTrackingMatch(match, transcription: transcription)
         }
     }
 
-    private func handleDiscoveryMatch(_ match: QuranVerseMatchingEngine.VerseMatchCandidate) -> RecognizedVerse? {
-        guard match.score >= matchingEngine.firstMatchThreshold else {
+    private func handleDiscoveryMatch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> RecognizedVerse? {
+        guard shouldAcceptRecoveryMatch(match) else {
+            pendingSurah = nil
+            pendingVerse = nil
+            consecutiveCount = 0
+            debugLog(
+                "rejecting stale recovery candidate \(match.surahNumber):\(match.verseNumber) below minimum \(recoveryMinimumVerse ?? 0)"
+            )
+            return nil
+        }
+
+        let threshold = discoveryAcceptanceThreshold
+        guard match.score >= threshold else {
             pendingSurah = nil
             pendingVerse = nil
             consecutiveCount = 0
@@ -91,21 +156,138 @@ final class RecitationTracker: @unchecked Sendable {
             consecutiveCount = 1
         }
 
-        guard consecutiveCount >= requiredConsecutiveDiscovery else { return nil }
+        debugLog("discovery pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveDiscovery)")
+
+        if isGenericPostCompletionOpening(match, transcription: transcription) {
+            debugLog("post-completion opening is generic bismillah, waiting for clearer evidence")
+            return nil
+        }
+
+        if isAmbiguousPostCompletionSwitch(match, transcription: transcription) {
+            debugLog("post-completion candidate is ambiguous, waiting for clearer evidence")
+            return nil
+        }
+
+        let isImmediateHighConfidence = match.score >= immediateDiscoveryThreshold
+        let isImmediateHintedSurah = surahHint == match.surahNumber &&
+            match.score >= hintedImmediateDiscoveryThreshold
+        let isImmediatePostCompletionSurahSwitch = shouldCommitPostCompletionSwitch(match)
+        guard consecutiveCount >= requiredConsecutiveDiscovery ||
+                isImmediateHighConfidence ||
+                isImmediateHintedSurah ||
+                isImmediatePostCompletionSurahSwitch else {
+            return nil
+        }
+        if consecutiveCount < requiredConsecutiveDiscovery {
+            if isImmediateHighConfidence {
+                debugLog("high-confidence discovery commit without second confirmation")
+            } else if isImmediateHintedSurah {
+                debugLog("hinted-surah discovery commit without second confirmation")
+            } else if isImmediatePostCompletionSurahSwitch {
+                debugLog("post-completion surah switch commit without second confirmation")
+            }
+        }
 
         currentSurah = match.surahNumber
         currentVerse = match.verseNumber
         pendingSurah = nil
         pendingVerse = nil
         consecutiveCount = 0
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
+        surahHint = nil
+        completedSurahBeforeDiscovery = nil
+        recoverySurah = nil
+        recoveryMinimumVerse = nil
         wordsCovered = 0
         totalWordsInVerse = matchingEngine
             .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
             .normalizedWords
             .count ?? 0
         mode = .tracking
+        debugLog("discovery committed \(match.surahNumber):\(match.verseNumber), switching to tracking")
 
         return recognizedVerse(from: match)
+    }
+
+    private var discoveryAcceptanceThreshold: Double {
+        if surahHint != nil {
+            return hintedDiscoveryThreshold
+        }
+        if completedSurahBeforeDiscovery != nil {
+            return postCompletionDiscoveryThreshold
+        }
+        return matchingEngine.firstMatchThreshold
+    }
+
+    private var shouldUseExhaustiveSpanSearch: Bool {
+        completedSurahBeforeDiscovery != nil
+    }
+
+    private var minimumVerseInSurahHint: Int? {
+        guard surahHint == recoverySurah else { return nil }
+        return recoveryMinimumVerse
+    }
+
+    private func shouldAcceptRecoveryMatch(_ match: QuranVerseMatchingEngine.VerseMatchCandidate) -> Bool {
+        guard let recoverySurah,
+              let recoveryMinimumVerse,
+              match.surahNumber == recoverySurah else {
+            return true
+        }
+
+        return match.verseNumber >= recoveryMinimumVerse
+    }
+
+    private func shouldCommitPostCompletionSwitch(_ match: QuranVerseMatchingEngine.VerseMatchCandidate) -> Bool {
+        guard let completedSurahBeforeDiscovery,
+              match.surahNumber != completedSurahBeforeDiscovery else {
+            return false
+        }
+
+        if match.verseNumber > 1 {
+            return match.score >= postCompletionDiscoveryThreshold
+        }
+
+        if match.ayahEnd != nil {
+            return match.score >= postCompletionDiscoveryThreshold
+        }
+
+        return match.score >= postCompletionOpeningImmediateThreshold
+    }
+
+    private func isAmbiguousPostCompletionSwitch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
+        guard let completedSurahBeforeDiscovery,
+              match.surahNumber != completedSurahBeforeDiscovery else {
+            return false
+        }
+
+        return matchingEngine.hasAmbiguousAlternative(
+            transcription: transcription,
+            candidate: match
+        )
+    }
+
+    private func isGenericPostCompletionOpening(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
+        guard let completedSurahBeforeDiscovery,
+              match.surahNumber != completedSurahBeforeDiscovery,
+              match.verseNumber == 1 else {
+            return false
+        }
+
+        let bismillahStems: Set<String> = ["بسم", "اسم", "الله", "رحمن", "رحيم"]
+        let contentStems = ArabicNormalizer.words(transcription)
+            .map(evidenceStem)
+            .filter { $0.count >= 3 && !bismillahStems.contains($0) }
+
+        return contentStems.isEmpty
     }
 
     private func handleTrackingMatch(
@@ -117,19 +299,66 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
+        if let spanEnd = match.ayahEnd,
+           match.surahNumber == currentSurah,
+           match.verseNumber <= currentVerse,
+           spanEnd > currentVerse,
+           let nextEntry = matchingEngine.getVerse(surah: currentSurah, verse: currentVerse + 1) {
+            debugLog("span continuation \(match.verseNumber)-\(spanEnd), advancing to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
+            return advance(to: nextEntry, confidence: match.score)
+        }
+
         if match.surahNumber == currentSurah && match.verseNumber == currentVerse {
-            updateWordCoverage(transcription: transcription, surah: currentSurah, verse: currentVerse)
+            let autoAdvancedVerse = updateWordCoverage(transcription: transcription, surah: currentSurah, verse: currentVerse)
             pendingSurah = nil
             pendingVerse = nil
             consecutiveCount = 0
+            resetLowConfidenceContinuation()
+            missedTrackingCount = 0
+            lowInformationTrackingCount = 0
+            if let autoAdvancedVerse {
+                return autoAdvancedVerse
+            }
+            debugLog("same verse \(currentSurah):\(currentVerse), words=\(wordsCovered)/\(totalWordsInVerse)")
+            return nil
+        }
+
+        if match.surahNumber == currentSurah && match.verseNumber < currentVerse {
+            pendingSurah = nil
+            pendingVerse = nil
+            consecutiveCount = 0
+            resetLowConfidenceContinuation()
+            missedTrackingCount = 0
+            lowInformationTrackingCount = 0
+            debugLog("ignoring stale previous verse \(match.surahNumber):\(match.verseNumber) while tracking \(currentSurah):\(currentVerse)")
             return nil
         }
 
         if isImmediateContinuation(match, currentSurah: currentSurah, currentVerse: currentVerse) {
+            guard match.score >= immediateContinuationThreshold,
+                  hasContinuationWordEvidence(match: match, transcription: transcription) else {
+                debugLog(
+                    "immediate continuation rejected score=\(String(format: "%.3f", match.score)) threshold=\(immediateContinuationThreshold)"
+                )
+                switch registerLowConfidenceShortVerseContinuation(match: match, transcription: transcription) {
+                case .accepted(let verse):
+                    return verse
+                case .pending:
+                    return nil
+                case .rejected:
+                    return handleTrackingMiss(transcription: transcription)
+                }
+            }
+            resetLowConfidenceContinuation()
+            debugLog("immediate continuation to \(match.surahNumber):\(match.verseNumber)")
             return advance(to: match)
         }
 
-        guard match.score >= jumpThreshold else { return nil }
+        guard match.score >= jumpThreshold else {
+            resetLowConfidenceContinuation()
+            debugLog("candidate below jump threshold score=\(String(format: "%.3f", match.score)) threshold=\(jumpThreshold)")
+            return handleTrackingMiss(transcription: transcription)
+        }
 
         if match.surahNumber == pendingSurah && match.verseNumber == pendingVerse {
             consecutiveCount += 1
@@ -139,6 +368,7 @@ final class RecitationTracker: @unchecked Sendable {
             consecutiveCount = 1
         }
 
+        debugLog("jump pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
         guard consecutiveCount >= requiredConsecutiveJump else { return nil }
         return advance(to: match)
     }
@@ -151,11 +381,218 @@ final class RecitationTracker: @unchecked Sendable {
         if match.surahNumber == currentSurah, match.verseNumber == currentVerse + 1 {
             return true
         }
-        return match.surahNumber == currentSurah + 1 && match.verseNumber == 1
+        return false
     }
 
-    private func updateWordCoverage(transcription: String, surah: Int, verse: Int) {
-        guard let entry = matchingEngine.getVerse(surah: surah, verse: verse) else { return }
+    private func hasContinuationWordEvidence(
+        match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
+        let transcribedWords = ArabicNormalizer.words(transcription)
+        let referenceWords = ArabicNormalizer.words(match.normalizedText)
+        guard !transcribedWords.isEmpty, !referenceWords.isEmpty else { return false }
+
+        for transcribedWord in transcribedWords where transcribedWord.count >= 4 {
+            for referenceWord in referenceWords where referenceWord.count >= 4 {
+                let transcribedStem = evidenceStem(transcribedWord)
+                let referenceStem = evidenceStem(referenceWord)
+                guard transcribedStem.count >= 3, referenceStem.count >= 3 else { continue }
+
+                let fullScore = LevenshteinMatcher.ratio(transcribedStem, referenceStem)
+                let partialScore = LevenshteinMatcher.partialRatio(transcribedStem, referenceStem)
+                if fullScore >= 0.70 || partialScore >= 0.75 {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
+    private func evidenceStem(_ word: String) -> String {
+        var result = word
+
+        if result.hasPrefix("وال"), result.count > 4 {
+            result.removeFirst(3)
+        } else if result.hasPrefix("فال"), result.count > 4 {
+            result.removeFirst(3)
+        } else if result.hasPrefix("ال"), result.count > 3 {
+            result.removeFirst(2)
+        } else if let first = result.first,
+                  ["و", "ف", "ب", "ل"].contains(first),
+                  result.count > 4 {
+            result.removeFirst()
+        }
+
+        for suffix in ["ين", "ون", "ان", "هم", "كم", "نا", "ها", "ه"] {
+            if result.hasSuffix(suffix), result.count - suffix.count >= 3 {
+                result.removeLast(suffix.count)
+                break
+            }
+        }
+
+        return result
+    }
+
+    private func registerLowConfidenceShortVerseContinuation(
+        match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> LowConfidenceContinuationDecision {
+        let normalizedTranscription = ArabicNormalizer.normalize(transcription)
+        guard normalizedTranscription.count >= minimumLowConfidenceContinuationCharacters,
+              match.score >= lowConfidenceShortVerseContinuationThreshold,
+              let entry = matchingEngine.getVerse(surah: match.surahNumber, verse: match.verseNumber),
+              entry.normalizedWords.count <= maximumWordsForLowConfidenceShortVerse else {
+            resetLowConfidenceContinuation()
+            return .rejected
+        }
+
+        if match.surahNumber == pendingLowConfidenceSurah && match.verseNumber == pendingLowConfidenceVerse {
+            consecutiveLowConfidenceContinuationCount += 1
+        } else {
+            pendingLowConfidenceSurah = match.surahNumber
+            pendingLowConfidenceVerse = match.verseNumber
+            consecutiveLowConfidenceContinuationCount = 1
+        }
+
+        debugLog(
+            "low-confidence short continuation pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveLowConfidenceContinuationCount)/\(requiredLowConfidenceShortVerseContinuations)"
+        )
+
+        guard consecutiveLowConfidenceContinuationCount >= requiredLowConfidenceShortVerseContinuations else {
+            return .pending
+        }
+
+        resetLowConfidenceContinuation()
+        debugLog("accepting repeated low-confidence short continuation to \(match.surahNumber):\(match.verseNumber)")
+        return .accepted(advance(to: match))
+    }
+
+    private func resetLowConfidenceContinuation() {
+        pendingLowConfidenceSurah = nil
+        pendingLowConfidenceVerse = nil
+        consecutiveLowConfidenceContinuationCount = 0
+    }
+
+    private func handleTrackingMiss(transcription: String) -> RecognizedVerse? {
+        guard shouldCountTrackingMiss(transcription) else {
+            if shouldLeaveNearEndTrackingAfterLowInformation() {
+                return returnToDiscoveryAfterTrackingLoss(
+                    lostSurah: currentSurah,
+                    lostVerse: currentVerse,
+                    assumeCompletedSurah: true,
+                    transcription: transcription
+                )
+            }
+            debugLog("ignoring low-information tracking miss")
+            return nil
+        }
+
+        let lostSurah = currentSurah
+        let lostVerse = currentVerse
+        let wasAtEndOfSurah = isAtEndOfSurah(surah: lostSurah, verse: lostVerse)
+        let shouldAssumeCompletedSurah = wasAtEndOfSurah || isNearEndOfSurah(surah: lostSurah, verse: lostVerse)
+        let maximumMisses = wasAtEndOfSurah
+            ? maximumMissedTrackingCountAfterCompletedSurah
+            : maximumMissedTrackingCount
+
+        missedTrackingCount += 1
+        lowInformationTrackingCount = 0
+        debugLog("tracking miss \(missedTrackingCount)/\(maximumMisses)")
+
+        guard missedTrackingCount >= maximumMisses else { return nil }
+
+        return returnToDiscoveryAfterTrackingLoss(
+            lostSurah: lostSurah,
+            lostVerse: lostVerse,
+            assumeCompletedSurah: shouldAssumeCompletedSurah,
+            transcription: transcription
+        )
+    }
+
+    private func returnToDiscoveryAfterTrackingLoss(
+        lostSurah: Int?,
+        lostVerse: Int?,
+        assumeCompletedSurah: Bool,
+        transcription: String
+    ) -> RecognizedVerse? {
+        debugLog("tracking lost, returning to discovery")
+        mode = .discovery
+        currentSurah = nil
+        currentVerse = nil
+        wordsCovered = 0
+        totalWordsInVerse = 0
+        pendingSurah = nil
+        pendingVerse = nil
+        consecutiveCount = 0
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
+        if assumeCompletedSurah {
+            completedSurahBeforeDiscovery = lostSurah
+            surahHint = nil
+            recoverySurah = nil
+            recoveryMinimumVerse = nil
+        } else {
+            completedSurahBeforeDiscovery = nil
+            surahHint = lostSurah
+            recoverySurah = lostSurah
+            recoveryMinimumVerse = lostVerse
+        }
+
+        guard let rediscovery = matchingEngine.findBestMatch(
+            transcription: transcription,
+            surahHint: surahHint,
+            minimumScore: discoveryAcceptanceThreshold,
+            minimumVerseInSurahHint: minimumVerseInSurahHint,
+            exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch
+        ) else {
+            debugLog("rediscovery found no global candidate")
+            return nil
+        }
+        debugLog(
+            "rediscovery candidate \(rediscovery.surahNumber):\(rediscovery.verseNumber) score=\(String(format: "%.3f", rediscovery.score))"
+        )
+        return handleDiscoveryMatch(rediscovery, transcription: transcription)
+    }
+
+    private func shouldLeaveNearEndTrackingAfterLowInformation() -> Bool {
+        guard isNearEndOfSurah(surah: currentSurah, verse: currentVerse) else {
+            lowInformationTrackingCount = 0
+            return false
+        }
+
+        lowInformationTrackingCount += 1
+        debugLog("low-information near-end tracking miss \(lowInformationTrackingCount)/\(maximumLowInformationTrackingCountNearSurahEnd)")
+        return lowInformationTrackingCount >= maximumLowInformationTrackingCountNearSurahEnd
+    }
+
+    private func isAtEndOfSurah(surah: Int?, verse: Int?) -> Bool {
+        surah.flatMap { surah in
+            verse.map { verse in
+                matchingEngine.getVerse(surah: surah, verse: verse + 1) == nil
+            }
+        } ?? false
+    }
+
+    private func isNearEndOfSurah(surah: Int?, verse: Int?) -> Bool {
+        guard let surah, let verse else { return false }
+        return matchingEngine.getVerse(surah: surah, verse: verse + 2) == nil
+    }
+
+    private func shouldCountTrackingMiss(_ transcription: String) -> Bool {
+        let words = ArabicNormalizer.words(transcription)
+        let characterCount = words.reduce(0) { $0 + $1.count }
+
+        if words.count >= 2, characterCount >= 6 {
+            return true
+        }
+
+        return words.contains { $0.count >= 6 }
+    }
+
+    private func updateWordCoverage(transcription: String, surah: Int, verse: Int) -> RecognizedVerse? {
+        guard let entry = matchingEngine.getVerse(surah: surah, verse: verse) else { return nil }
         let alignment = LevenshteinMatcher.wordAlignment(
             transcription: transcription,
             reference: entry.normalizedText
@@ -163,31 +600,69 @@ final class RecitationTracker: @unchecked Sendable {
         wordsCovered = alignment.matched
         totalWordsInVerse = alignment.total
 
-        guard alignment.total > 0 else { return }
+        guard alignment.total > 0 else { return nil }
         let coverage = Double(alignment.matched) / Double(alignment.total)
+        debugLog("coverage \(surah):\(verse) \(alignment.matched)/\(alignment.total) = \(String(format: "%.2f", coverage))")
         guard coverage >= autoAdvanceCoverage,
               let nextEntry = matchingEngine.getVerse(surah: surah, verse: verse + 1) else {
-            return
+            return nil
         }
 
         currentSurah = nextEntry.surahNumber
         currentVerse = nextEntry.verseNumber
         wordsCovered = 0
         totalWordsInVerse = nextEntry.normalizedWords.count
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
+        debugLog("auto-advanced internally to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
+        return RecognizedVerse(
+            surahNumber: nextEntry.surahNumber,
+            verseNumber: nextEntry.verseNumber,
+            ayahEnd: nil,
+            confidence: coverage,
+            arabicText: nextEntry.arabicText
+        )
     }
 
     private func advance(to match: QuranVerseMatchingEngine.VerseMatchCandidate) -> RecognizedVerse {
-        currentSurah = match.surahNumber
-        currentVerse = match.verseNumber
+        guard let entry = matchingEngine.getVerse(surah: match.surahNumber, verse: match.verseNumber) else {
+            currentSurah = match.surahNumber
+            currentVerse = match.verseNumber
+            pendingSurah = nil
+            pendingVerse = nil
+            consecutiveCount = 0
+            resetLowConfidenceContinuation()
+            missedTrackingCount = 0
+            lowInformationTrackingCount = 0
+            wordsCovered = 0
+            totalWordsInVerse = 0
+            debugLog("advanced to \(match.surahNumber):\(match.verseNumber)")
+            return recognizedVerse(from: match)
+        }
+
+        return advance(to: entry, confidence: match.score)
+    }
+
+    private func advance(to entry: QuranVerseMatchingEngine.VerseEntry, confidence: Double) -> RecognizedVerse {
+        currentSurah = entry.surahNumber
+        currentVerse = entry.verseNumber
         pendingSurah = nil
         pendingVerse = nil
         consecutiveCount = 0
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
         wordsCovered = 0
-        totalWordsInVerse = matchingEngine
-            .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
-            .normalizedWords
-            .count ?? 0
-        return recognizedVerse(from: match)
+        totalWordsInVerse = entry.normalizedWords.count
+        debugLog("advanced to \(entry.surahNumber):\(entry.verseNumber)")
+        return RecognizedVerse(
+            surahNumber: entry.surahNumber,
+            verseNumber: entry.verseNumber,
+            ayahEnd: nil,
+            confidence: confidence,
+            arabicText: entry.arabicText
+        )
     }
 
     private func recognizedVerse(from match: QuranVerseMatchingEngine.VerseMatchCandidate) -> RecognizedVerse {
@@ -198,5 +673,10 @@ final class RecitationTracker: @unchecked Sendable {
             confidence: match.score,
             arabicText: match.arabicText
         )
+    }
+
+    private func debugLog(_ message: String) {
+        guard debugLogging else { return }
+        print("[QuranRecognitionKit.Tracker] \(message)")
     }
 }

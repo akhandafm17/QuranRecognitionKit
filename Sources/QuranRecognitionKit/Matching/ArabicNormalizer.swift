@@ -19,6 +19,10 @@ public enum ArabicNormalizer {
             if value == 0xFEFF || isArabicDiacriticOrTatweel(value) {
                 continue
             }
+            if isSeparatorOrPunctuation(scalar) {
+                result.append(" ")
+                continue
+            }
 
             if let mapped = normalizationMap[value], let normalizedScalar = UnicodeScalar(mapped) {
                 result.unicodeScalars.append(normalizedScalar)
@@ -51,5 +55,16 @@ public enum ArabicNormalizer {
         default:
             return false
         }
+    }
+
+    private static func isSeparatorOrPunctuation(_ scalar: UnicodeScalar) -> Bool {
+        if CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            return true
+        }
+        if CharacterSet.punctuationCharacters.contains(scalar) ||
+            CharacterSet.symbols.contains(scalar) {
+            return true
+        }
+        return false
     }
 }

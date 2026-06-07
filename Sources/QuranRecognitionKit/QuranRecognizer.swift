@@ -7,19 +7,34 @@ public final class QuranRecognizer: @unchecked Sendable {
         public var trackingWindowSeconds: Double
         public var maximumBufferedSeconds: Double
         public var intraOpThreadCount: Int
+        public var minimumSpeechRMS: Float
+        public var minimumSpeechPeak: Float
+        public var minimumSpeechFrameRatio: Double
+        public var suppressLowInformationTranscriptions: Bool
+        public var debugLogging: Bool
 
         public init(
-            processingInterval: TimeInterval = 0.35,
-            discoveryWindowSeconds: Double = 2.0,
-            trackingWindowSeconds: Double = 0.75,
-            maximumBufferedSeconds: Double = 10.0,
-            intraOpThreadCount: Int = 2
+            processingInterval: TimeInterval = 0.75,
+            discoveryWindowSeconds: Double = 5.0,
+            trackingWindowSeconds: Double = 4.0,
+            maximumBufferedSeconds: Double = 12.0,
+            intraOpThreadCount: Int = 2,
+            minimumSpeechRMS: Float = 0.0015,
+            minimumSpeechPeak: Float = 0.006,
+            minimumSpeechFrameRatio: Double = 0.03,
+            suppressLowInformationTranscriptions: Bool = true,
+            debugLogging: Bool = false
         ) {
             self.processingInterval = processingInterval
             self.discoveryWindowSeconds = discoveryWindowSeconds
             self.trackingWindowSeconds = trackingWindowSeconds
             self.maximumBufferedSeconds = maximumBufferedSeconds
             self.intraOpThreadCount = intraOpThreadCount
+            self.minimumSpeechRMS = minimumSpeechRMS
+            self.minimumSpeechPeak = minimumSpeechPeak
+            self.minimumSpeechFrameRatio = minimumSpeechFrameRatio
+            self.suppressLowInformationTranscriptions = suppressLowInformationTranscriptions
+            self.debugLogging = debugLogging
         }
     }
 
@@ -39,17 +54,21 @@ public final class QuranRecognizer: @unchecked Sendable {
     public func prepare() async throws {
         if pipelineSnapshot() != nil { return }
 
+        debugLog("prepare() started model=\(modelURL.path)")
         try await withCheckedThrowingContinuation { continuation in
             prepareQueue.async {
                 do {
                     let decoder = try CTCDecoder.loadBundled()
+                    self.debugLog("loaded vocab count=\(decoder.vocabularyCount) blank=\(decoder.blankTokenId)")
                     let matchingEngine = try QuranVerseMatchingEngine.loadBundled()
+                    self.debugLog("loaded quran index verses=\(matchingEngine.totalVerses)")
                     let model = ONNXQuranModel(
                         modelURL: self.modelURL,
                         expectedVocabularySize: decoder.vocabularyCount,
                         intraOpThreadCount: self.configuration.intraOpThreadCount
                     )
                     try model.prepare()
+                    self.debugLog("onnx model prepared")
 
                     let pipeline = Pipeline(
                         melComputer: MelSpectrogramComputer(),
@@ -61,8 +80,10 @@ public final class QuranRecognizer: @unchecked Sendable {
                     self.lock.withLock {
                         self.pipeline = pipeline
                     }
+                    self.debugLog("prepare() complete")
                     continuation.resume()
                 } catch {
+                    self.debugLog("prepare() failed error=\(error)")
                     continuation.resume(throwing: error)
                 }
             }
@@ -71,12 +92,17 @@ public final class QuranRecognizer: @unchecked Sendable {
 
     public func startListening(surahHint: Int? = nil) throws -> QuranRecognitionSession {
         let pipeline = try requirePipeline()
-        let tracker = RecitationTracker(matchingEngine: pipeline.matchingEngine, surahHint: surahHint)
+        debugLog("startListening(surahHint=\(surahHint.map(String.init) ?? "nil"))")
+        let tracker = RecitationTracker(
+            matchingEngine: pipeline.matchingEngine,
+            surahHint: surahHint,
+            debugLogging: configuration.debugLogging
+        )
         let session = QuranRecognitionSession(
             recognizer: self,
             tracker: tracker,
             configuration: configuration,
-            audioCapture: AudioCapture()
+            audioCapture: AudioCapture(debugLogging: configuration.debugLogging)
         )
         try session.start()
         return session
@@ -84,9 +110,12 @@ public final class QuranRecognizer: @unchecked Sendable {
 
     public func recognize(samples: [Float], surahHint: Int? = nil) async throws -> RecognizedVerse? {
         let pipeline = try requirePipeline()
-        let tracker = RecitationTracker(matchingEngine: pipeline.matchingEngine, surahHint: surahHint)
+        let tracker = RecitationTracker(
+            matchingEngine: pipeline.matchingEngine,
+            surahHint: surahHint,
+            debugLogging: configuration.debugLogging
+        )
         let transcription = try transcribe(samples: samples)
-        _ = tracker.processTranscription(transcription)
         return tracker.processTranscription(transcription)
     }
 
@@ -94,14 +123,24 @@ public final class QuranRecognizer: @unchecked Sendable {
         let pipeline = try requirePipeline()
 
         return try inferenceQueue.sync {
+            let startedAt = Date()
+            debugLog("transcribe() samples=\(samples.count) seconds=\(String(format: "%.2f", Double(samples.count) / 16_000.0))")
             let mel = pipeline.melComputer.compute(samples: samples)
-            guard mel.timeFrameCount > 0 else { return "" }
+            debugLog("mel frames=\(mel.timeFrameCount) bins=\(mel.melBinCount)")
+            guard mel.timeFrameCount > 0 else {
+                debugLog("transcribe() skipped empty mel")
+                return ""
+            }
             let logProbs = try pipeline.model.run(melSpectrogram: mel)
-            return pipeline.decoder.decode(
+            debugLog("onnx output timeSteps=\(logProbs.timeSteps) vocab=\(logProbs.vocabularySize)")
+            let transcription = pipeline.decoder.decode(
                 logProbs: logProbs.values,
                 timeSteps: logProbs.timeSteps,
                 vocabSize: logProbs.vocabularySize
             )
+            let elapsed = Date().timeIntervalSince(startedAt)
+            debugLog("decoded='\(transcription)' elapsed=\(String(format: "%.3f", elapsed))s")
+            return transcription
         }
     }
 
@@ -114,6 +153,11 @@ public final class QuranRecognizer: @unchecked Sendable {
 
     private func pipelineSnapshot() -> Pipeline? {
         lock.withLock { pipeline }
+    }
+
+    func debugLog(_ message: String) {
+        guard configuration.debugLogging else { return }
+        print("[QuranRecognitionKit] \(message)")
     }
 }
 

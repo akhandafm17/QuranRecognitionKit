@@ -10,3 +10,7 @@ import Testing
     let text = "\u{FEFF}  بِسْمِ   ٱللَّهِ  "
     #expect(ArabicNormalizer.normalize(text) == "بسم الله")
 }
+
+@Test func arabicNormalizationStripsPunctuation() {
+    #expect(ArabicNormalizer.normalize("ما عليك اليوم؟") == "ما عليك اليوم")
+}

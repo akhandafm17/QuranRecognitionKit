@@ -8,6 +8,7 @@ The package is a Swift implementation of the `offline-tarteel` pipeline shape:
 2. Compute 80-bin NeMo-compatible mel spectrogram features.
 3. Run the ONNX FastConformer CTC model with ONNX Runtime.
 4. Greedy CTC decode and fuzzy-match the transcript against all 6,236 Quran verses.
+5. Track recitation progress across verses and recover into discovery when the user starts another surah.
 
 The SDK does not bundle the ONNX model. It bundles only `vocab.json` and `quran.json` through `Bundle.module`.
 
@@ -67,17 +68,35 @@ If you use `ModelDownloader`, an expected SHA-256 is required.
 ```swift
 import QuranRecognitionKit
 
-let recognizer = QuranRecognizer(modelURL: modelURL)
+let configuration = QuranRecognizer.Configuration(
+    processingInterval: 0.75,
+    discoveryWindowSeconds: 5.0,
+    trackingWindowSeconds: 4.0,
+    maximumBufferedSeconds: 12.0,
+    intraOpThreadCount: 2,
+    minimumSpeechRMS: 0.0015,
+    minimumSpeechPeak: 0.006,
+    minimumSpeechFrameRatio: 0.03,
+    suppressLowInformationTranscriptions: true,
+    debugLogging: false
+)
+
+let recognizer = QuranRecognizer(modelURL: modelURL, configuration: configuration)
 try await recognizer.prepare()
 
-let session = try recognizer.startListening(surahHint: nil)
+let session = try recognizer.startListening(surahHint: 1)
 
 for await event in session.events {
     switch event {
+    case .audioInput(let quality):
+        if !quality.isSpeechLikely {
+            print("Waiting for clear recitation: \(quality.status)")
+        }
     case .transcription(let text):
+        // Intended for live UI. Low-information fragments are suppressed by default.
         print(text)
     case .verseDetected(let verse):
-        print(verse)
+        print("Detected \(verse.surahNumber):\(verse.verseNumber)")
     case .stateChanged(let state):
         print(state)
     case .error(let error):
@@ -92,6 +111,8 @@ Stop safely:
 session.stop()
 ```
 
+Pass the current surah number as `surahHint` when recognition starts from a Quran reader. Discovery will prefer that surah first, which improves startup speed and reduces false jumps for the common case where the user recites from the displayed surah.
+
 You can also run a non-streaming manual check with:
 
 ```bash
@@ -101,6 +122,14 @@ swift run QuranRecognitionManualHarness /path/to/FastConformerQuranCTC.onnx /pat
 ## Public API
 
 ```swift
+public enum RecognitionState: Sendable, Equatable {
+    case idle
+    case preparing
+    case listening
+    case processing
+    case stopped
+}
+
 public struct RecognizedVerse: Sendable {
     public let surahNumber: Int
     public let verseNumber: Int
@@ -109,13 +138,58 @@ public struct RecognizedVerse: Sendable {
     public let arabicText: String
 }
 
+public enum AudioInputStatus: Sendable, Equatable {
+    case silence
+    case tooLittleSpeech
+    case speech
+    case clipped
+}
+
+public struct AudioInputQuality: Sendable {
+    public let rms: Float
+    public let peak: Float
+    public let rmsDecibels: Float
+    public let speechFrameRatio: Double
+    public let windowSeconds: Double
+    public let status: AudioInputStatus
+    public let isSpeechLikely: Bool
+}
+
 public enum RecognitionEvent: Sendable {
+    case audioInput(AudioInputQuality)
     case transcription(String)
     case verseDetected(RecognizedVerse)
     case stateChanged(RecognitionState)
     case error(RecognitionError)
 }
 ```
+
+### Configuration
+
+```swift
+extension QuranRecognizer {
+    public struct Configuration: Sendable, Equatable {
+        public var processingInterval: TimeInterval
+        public var discoveryWindowSeconds: Double
+        public var trackingWindowSeconds: Double
+        public var maximumBufferedSeconds: Double
+        public var intraOpThreadCount: Int
+        public var minimumSpeechRMS: Float
+        public var minimumSpeechPeak: Float
+        public var minimumSpeechFrameRatio: Double
+        public var suppressLowInformationTranscriptions: Bool
+        public var debugLogging: Bool
+    }
+}
+```
+
+The default streaming setup uses longer rolling windows for stability:
+
+- Discovery: 5 seconds.
+- Tracking: 4 seconds.
+- Fresh audio gate: 1.5 seconds in discovery, 1.25 seconds in tracking.
+- Audio quality gate: skips silence, very weak speech, and clipped windows before ONNX inference.
+- Transcript quality gate: suppresses short fragments such as single letters from the public `.transcription` event by default.
 
 ## Performance Notes
 
@@ -126,21 +200,22 @@ The SDK avoids main-thread inference and audio processing:
 - Inference runs on a serial background queue and reuses the ONNX session.
 - Mel computation reuses FFT setup, Hann window, and mel filterbank.
 - The audio buffer is capped by `maximumBufferedSeconds`.
-- Verse matching scans all verses once, then evaluates multi-verse spans only around the top candidates.
+- Low-speech audio windows are skipped before ONNX inference.
+- Verse matching uses an evidence index and bounded span search instead of scanning every possible span.
+- Tracking mode searches locally around the current verse before returning to global discovery.
 
 Measured in this implementation pass:
 
-- `swift test` passes on macOS arm64 with 12 tests.
-- Exact verse matching test over bundled resources completed in about 4.3 seconds in the test runner.
-- Manual end-to-end harness on macOS with `001001.mp3` predicted `1:1` with confidence `0.846`.
-- End-to-end ONNX latency was not measured on simulator or physical iPhone in this pass.
+- `swift test` passes on macOS arm64 with 33 tests.
+- The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
+- App-side iOS generic builds passed with this local package integrated.
 
 Known bottlenecks to profile before release:
 
 - ONNX Runtime CPU latency on simulator and a physical iPhone.
 - Mel spectrogram allocation volume for long-running streaming sessions.
-- Full-corpus Levenshtein matching cost during discovery.
 - Microphone conversion stability during long continuous sessions.
+- Real-world recitation quality across devices, rooms, reciters, and microphone positions.
 
 Do not claim perfect performance. Record CPU, memory, and latency on at least one simulator and one physical iPhone before publishing release claims.
 
@@ -154,10 +229,12 @@ swift test
 
 Current tests cover:
 
+- Audio quality gating and low-information transcript suppression.
 - Arabic normalization.
 - CTC decoding.
 - Levenshtein distance and word alignment.
 - Verse matching.
+- Recitation tracking, surah hints, post-completion discovery, and recovery.
 - Resource loading.
 - Model path validation.
 - Recognition session start/stop lifecycle with a mock capture source.
