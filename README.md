@@ -13,14 +13,13 @@ The package is a Swift implementation of the `offline-tarteel` pipeline shape:
 4. Greedy CTC decode and fuzzy-match the transcript against all 6,236 Quran verses.
 5. Track recitation progress across verses and recover into discovery when the user starts another surah.
 
-The SDK does not bundle the ONNX model. It bundles only `vocab.json` and `quran.json` through `Bundle.module`.
+The SDK bundles the zipped ONNX model, `vocab.json`, and `quran.json` through `Bundle.module`.
 
 ## Requirements
 
 - Swift 6.2 or newer.
 - iOS 17 or newer.
 - Xcode with a Swift 6.2 toolchain or newer for app integration.
-- A local ONNX FastConformer CTC model compatible with the bundled vocabulary.
 - Microphone permission if you use live recognition through `startListening`.
 
 QuranRecognitionKit depends on Microsoft's `onnxruntime-swift-package-manager` package. Swift Package Manager resolves this dependency automatically.
@@ -49,13 +48,13 @@ In Xcode:
 
 1. Choose `File > Add Package Dependencies`.
 2. Enter `https://github.com/akhandafm17/QuranRecognitionKit.git`.
-3. Select version `0.1.2` or newer.
+3. Select version `0.1.3` or newer.
 4. Add the `QuranRecognitionKit` product to the app target.
 
 In a Swift package manifest:
 
 ```swift
-.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.2")
+.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.3")
 ```
 
 The package requires iOS 17 or newer.
@@ -73,22 +72,31 @@ The SDK configures an `AVAudioSession` for recording when `startListening` is ca
 
 `ModelDownloader` uses `URLSession`. If your model URL is not HTTPS, configure App Transport Security in the host app.
 
-## Model Setup
+## Bundled Model
 
-Pass a local ONNX model URL to the recognizer:
+QuranRecognitionKit includes a bundled zipped ONNX model. For the common path, create a ready-to-use recognizer from the bundled model:
+
+```swift
+let recognizer = try await QuranRecognizer.bundled()
+try await recognizer.prepare()
+```
+
+On first use, the SDK extracts and verifies the bundled model into the app cache directory. Later calls reuse the extracted model if the checksum still matches.
+
+The bundled archive is about 96 MB, and the extracted ONNX model is about 126 MB. This makes the Swift package larger, but keeps integration ready-to-go and fully offline after installation.
+
+The expected audio input for direct recognition is 16 kHz mono `Float` PCM samples. Live recognition captures microphone input and converts it internally before inference.
+
+## Custom Model
+
+You can still pass your own compatible ONNX model URL:
 
 ```swift
 let recognizer = QuranRecognizer(modelURL: modelURL)
 try await recognizer.prepare()
 ```
 
-The model is intentionally not included in the Swift package because it is large. The host app must download, ship, or otherwise provide a compatible `.onnx` file and pass its local file URL to `QuranRecognizer`.
-
-The expected audio input for direct recognition is 16 kHz mono `Float` PCM samples. Live recognition captures microphone input and converts it internally before inference.
-
 The model must produce CTC logits for the same vocabulary bundled in `vocab.json`. If the model vocabulary size does not match, `prepare()` throws `RecognitionError.vocabModelMismatch`.
-
-If your app downloads a compressed model archive, verify the archive, extract the `.onnx` file, and pass the extracted model URL to the SDK.
 
 If you use `ModelDownloader`, an expected SHA-256 is required.
 
@@ -125,7 +133,7 @@ let configuration = QuranRecognizer.Configuration(
     debugLogging: false
 )
 
-let recognizer = QuranRecognizer(modelURL: modelURL, configuration: configuration)
+let recognizer = try await QuranRecognizer.bundled(configuration: configuration)
 try await recognizer.prepare()
 
 let session = try recognizer.startListening(surahHint: 1)
@@ -185,6 +193,7 @@ swift run QuranRecognitionManualHarness /path/to/FastConformerQuranCTC.onnx /pat
 ```swift
 public final class QuranRecognizer: @unchecked Sendable {
     public init(modelURL: URL, configuration: Configuration = Configuration())
+    public static func bundled(configuration: Configuration = Configuration()) async throws -> QuranRecognizer
 
     public func prepare() async throws
     public func startListening(surahHint: Int? = nil) throws -> QuranRecognitionSession
@@ -193,6 +202,20 @@ public final class QuranRecognizer: @unchecked Sendable {
 ```
 
 Call `prepare()` once before recognition. It loads bundled resources, creates the ONNX Runtime session, and validates the model against the bundled vocabulary.
+
+### Bundled Model
+
+```swift
+public enum BundledQuranModel {
+    public static let archiveFileName: String
+    public static let modelFileName: String
+
+    public static func modelURL() async throws -> URL
+    public static func removeExtractedModel() throws
+}
+```
+
+`modelURL()` extracts and verifies the bundled model if needed, then returns the local extracted ONNX file URL. `removeExtractedModel()` removes the cached extracted model so it can be recreated from the bundled archive.
 
 ### Session
 
@@ -347,7 +370,7 @@ Call `try await recognizer.prepare()` before `startListening` or `recognize(samp
 
 ### `RecognitionError.modelMissing` Or `modelCorrupt`
 
-Verify the local model URL points to an existing, non-empty `.onnx` file. If you download a compressed archive, extract the ONNX file before passing it to `QuranRecognizer`.
+For the bundled model path, call `BundledQuranModel.removeExtractedModel()` and try again. For custom models, verify the local model URL points to an existing, non-empty `.onnx` file.
 
 ### `RecognitionError.vocabModelMismatch`
 
@@ -399,4 +422,6 @@ The manual harness is the integration path for real model + audio validation.
 
 ## License
 
-QuranRecognitionKit is available under the MIT license. See [LICENSE](LICENSE).
+QuranRecognitionKit source code is available under the MIT license. See [LICENSE](LICENSE).
+
+The bundled model has separate upstream attribution and license terms. See [MODEL_NOTICE.md](MODEL_NOTICE.md).

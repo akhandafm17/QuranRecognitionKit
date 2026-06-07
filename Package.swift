@@ -32,6 +32,7 @@ let package = Package(
                 .product(name: "onnxruntime", package: "onnxruntime-swift-package-manager")
             ],
             resources: [
+                .copy("Resources/FastConformerQuranCTC.onnx.zip"),
                 .process("Resources/vocab.json"),
                 .process("Resources/quran.json")
             ]

@@ -51,6 +51,11 @@ public final class QuranRecognizer: @unchecked Sendable {
         self.configuration = configuration
     }
 
+    public static func bundled(configuration: Configuration = Configuration()) async throws -> QuranRecognizer {
+        let modelURL = try await BundledQuranModel.modelURL()
+        return QuranRecognizer(modelURL: modelURL, configuration: configuration)
+    }
+
     public func prepare() async throws {
         if pipelineSnapshot() != nil { return }
 
