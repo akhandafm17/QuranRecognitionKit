@@ -38,7 +38,7 @@ import QuranRecognitionKit
 Consumers can add:
 
 ```swift
-.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.0")
+.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.2")
 ```
 
 The package requires iOS 17 or newer.
@@ -243,3 +243,7 @@ Current tests cover:
 - Recognition session start/stop lifecycle with a mock capture source.
 
 The manual harness is the integration path for real model + audio validation.
+
+## License
+
+QuranRecognitionKit is available under the MIT license. See [LICENSE](LICENSE).
