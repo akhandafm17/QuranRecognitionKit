@@ -147,6 +147,38 @@ import Testing
     #expect(seventh.verseNumber == 7)
 }
 
+@Test func fatihahTrackingAdvancesThroughNoisySequentialFragmentsFromLog() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    _ = try #require(tracker.processTranscription("بسم الله الرحمن الرحمن الرحيم"))
+    _ = try #require(tracker.processTranscription("بِ رَبِّ الْعَالمِينَ"))
+    _ = try #require(tracker.processTranscription("بِ الرَّحْمَِ الرَّحِيِ"))
+
+    let fourth = try #require(tracker.processTranscription("ش الِينَ"))
+    #expect(fourth.surahNumber == 1)
+    #expect(fourth.verseNumber == 4)
+
+    let fifth = try #require(tracker.processTranscription("قل وإن عنك مست"))
+    #expect(fifth.surahNumber == 1)
+    #expect(fifth.verseNumber == 5)
+}
+
+@Test func trackingCanSwitchSurahOnHighConfidenceGlobalMatchFromLog() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    _ = try #require(tracker.processTranscription("بسم الله الرحمن الرحيم"))
+    _ = try #require(tracker.processTranscription("بِ رَبِّ الْعَالمِينَ"))
+    _ = try #require(tracker.processTranscription("بِ الرَّحْمَِ الرَّحِيِ"))
+
+    #expect(tracker.processTranscription("بسم الله الرحمن الرحيم") == nil)
+
+    let switched = try #require(tracker.processTranscription("قُلْ أَعُوذُ بِرَبِّ النَّاسِ"))
+    #expect(switched.surahNumber == 114)
+    #expect(switched.verseNumber == 1)
+}
+
 @Test func lowInformationTrackingNoiseDoesNotLoseCurrentVerse() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine)

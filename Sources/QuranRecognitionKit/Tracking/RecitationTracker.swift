@@ -43,6 +43,10 @@ final class RecitationTracker: @unchecked Sendable {
     private let postCompletionOpeningImmediateThreshold = 0.80
     private let immediateDiscoveryThreshold = 0.85
     private let immediateContinuationThreshold = 0.55
+    private let probableImmediateContinuationThreshold = 0.60
+    private let probableSpanContinuationThreshold = 0.54
+    private let trackingGlobalSwitchThreshold = 0.82
+    private let trackingGlobalSwitchMargin = 0.18
     private let lowConfidenceShortVerseContinuationThreshold = 0.45
     private let requiredLowConfidenceShortVerseContinuations = 2
     private let maximumWordsForLowConfidenceShortVerse = 2
@@ -94,11 +98,23 @@ final class RecitationTracker: @unchecked Sendable {
             )
         case .tracking:
             if let currentSurah, let currentVerse {
-                match = matchingEngine.findBestMatchScoped(
+                let scopedMatch = matchingEngine.findBestMatchScoped(
                     transcription: transcription,
                     currentSurah: currentSurah,
                     currentVerse: currentVerse
                 )
+                if let globalSwitch = trackingGlobalSwitchCandidate(
+                    transcription: transcription,
+                    scopedMatch: scopedMatch,
+                    currentSurah: currentSurah,
+                    currentVerse: currentVerse
+                ) {
+                    debugLog(
+                        "global switch candidate \(globalSwitch.surahNumber):\(globalSwitch.verseNumber) score=\(String(format: "%.3f", globalSwitch.score)) scoped=\(scopedMatch.map { "\($0.surahNumber):\($0.verseNumber) \($0.score)" } ?? "nil")"
+                    )
+                    return handleTrackingGlobalSwitch(globalSwitch)
+                }
+                match = scopedMatch
             } else {
                 match = matchingEngine.findBestMatch(transcription: transcription)
             }
@@ -130,7 +146,7 @@ final class RecitationTracker: @unchecked Sendable {
         _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
         transcription: String
     ) -> RecognizedVerse? {
-        guard shouldAcceptRecoveryMatch(match) else {
+        guard shouldAcceptRecoveryMatch(match, transcription: transcription) else {
             pendingSurah = nil
             pendingVerse = nil
             consecutiveCount = 0
@@ -230,11 +246,17 @@ final class RecitationTracker: @unchecked Sendable {
         return recoveryMinimumVerse
     }
 
-    private func shouldAcceptRecoveryMatch(_ match: QuranVerseMatchingEngine.VerseMatchCandidate) -> Bool {
+    private func shouldAcceptRecoveryMatch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
         guard let recoverySurah,
-              let recoveryMinimumVerse,
-              match.surahNumber == recoverySurah else {
+              let recoveryMinimumVerse else {
             return true
+        }
+
+        guard match.surahNumber == recoverySurah else {
+            return isReliableCrossSurahSwitch(match, transcription: transcription)
         }
 
         return match.verseNumber >= recoveryMinimumVerse
@@ -345,8 +367,18 @@ final class RecitationTracker: @unchecked Sendable {
             currentSurah: currentSurah,
             currentVerse: currentVerse
         ) {
-            guard effectiveMatch.score >= immediateContinuationThreshold,
-                  hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription) else {
+            let hasWordEvidence = hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription)
+            let hasStrongSingleEvidence = hasStrongSingleContinuationEvidence(
+                referenceText: effectiveMatch.normalizedText,
+                transcription: transcription
+            )
+            let isProbableNoisyContinuation = shouldAcceptNoisySequentialContinuation(
+                match: effectiveMatch,
+                transcription: transcription,
+                threshold: probableSpanContinuationThreshold
+            )
+            guard (effectiveMatch.score >= immediateContinuationThreshold && (hasWordEvidence || hasStrongSingleEvidence)) ||
+                    isProbableNoisyContinuation else {
                 debugLog(
                     "resolved span continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
                 )
@@ -354,13 +386,23 @@ final class RecitationTracker: @unchecked Sendable {
             }
 
             resetLowConfidenceContinuation()
-            debugLog("resolved span continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
+            debugLog("resolved span continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) wordEvidence=\(hasWordEvidence)")
             return advance(to: effectiveMatch)
         }
 
         if isImmediateContinuation(effectiveMatch, currentSurah: currentSurah, currentVerse: currentVerse) {
-            guard effectiveMatch.score >= immediateContinuationThreshold,
-                  hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription) else {
+            let hasWordEvidence = hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription)
+            let hasStrongSingleEvidence = hasStrongSingleContinuationEvidence(
+                referenceText: effectiveMatch.normalizedText,
+                transcription: transcription
+            )
+            let isProbableNoisyContinuation = shouldAcceptNoisySequentialContinuation(
+                match: effectiveMatch,
+                transcription: transcription,
+                threshold: probableImmediateContinuationThreshold
+            )
+            guard (effectiveMatch.score >= immediateContinuationThreshold && (hasWordEvidence || hasStrongSingleEvidence)) ||
+                    isProbableNoisyContinuation else {
                 debugLog(
                     "immediate continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
                 )
@@ -375,7 +417,7 @@ final class RecitationTracker: @unchecked Sendable {
             }
 
             resetLowConfidenceContinuation()
-            debugLog("immediate continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
+            debugLog("immediate continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) wordEvidence=\(hasWordEvidence)")
             return advance(to: effectiveMatch)
         }
 
@@ -448,6 +490,111 @@ final class RecitationTracker: @unchecked Sendable {
         return originalMatch.verseNumber == currentVerse + 1
     }
 
+    private func trackingGlobalSwitchCandidate(
+        transcription: String,
+        scopedMatch: QuranVerseMatchingEngine.VerseMatchCandidate?,
+        currentSurah: Int,
+        currentVerse: Int
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate? {
+        guard shouldConsiderGlobalSwitch(
+            scopedMatch: scopedMatch,
+            currentSurah: currentSurah,
+            currentVerse: currentVerse
+        ),
+              hasUsefulGlobalSwitchContent(transcription) else {
+            return nil
+        }
+
+        guard let globalMatch = matchingEngine.findBestMatch(
+            transcription: transcription,
+            minimumScore: trackingGlobalSwitchThreshold,
+            exhaustiveSpanSearch: true
+        ) else {
+            return nil
+        }
+
+        guard globalMatch.surahNumber != currentSurah else { return nil }
+        guard isReliableCrossSurahSwitch(globalMatch, transcription: transcription) else { return nil }
+
+        if let scopedMatch,
+           globalMatch.score < 0.97,
+           globalMatch.score < scopedMatch.score + trackingGlobalSwitchMargin {
+            return nil
+        }
+
+        if globalMatch.score < 0.97,
+           matchingEngine.hasAmbiguousAlternative(
+            transcription: transcription,
+            candidate: globalMatch,
+            scoreTolerance: 0.03
+           ) {
+            return nil
+        }
+
+        return globalMatch
+    }
+
+    private func isReliableCrossSurahSwitch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
+        guard match.score >= trackingGlobalSwitchThreshold else { return false }
+        guard !isGenericOpeningOrPraisePhrase(transcription) else { return false }
+        guard match.verseNumber == 1 || match.score >= 0.97 else { return false }
+        return distinctiveEvidenceHitCount(
+            referenceText: match.normalizedText,
+            transcription: transcription
+        ) >= 2
+    }
+
+    private func shouldConsiderGlobalSwitch(
+        scopedMatch: QuranVerseMatchingEngine.VerseMatchCandidate?,
+        currentSurah: Int,
+        currentVerse: Int
+    ) -> Bool {
+        guard let scopedMatch else { return true }
+
+        if scopedMatch.surahNumber != currentSurah {
+            return true
+        }
+
+        if scopedMatch.verseNumber == currentVerse {
+            return false
+        }
+
+        if scopedMatch.verseNumber == currentVerse + 1,
+           scopedMatch.score >= probableImmediateContinuationThreshold {
+            return false
+        }
+
+        return scopedMatch.score < immediateContinuationThreshold
+    }
+
+    private func handleTrackingGlobalSwitch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate
+    ) -> RecognizedVerse {
+        currentSurah = match.surahNumber
+        currentVerse = match.verseNumber
+        pendingSurah = nil
+        pendingVerse = nil
+        consecutiveCount = 0
+        resetLowConfidenceContinuation()
+        missedTrackingCount = 0
+        lowInformationTrackingCount = 0
+        completedSurahBeforeDiscovery = nil
+        recoverySurah = nil
+        recoveryMinimumVerse = nil
+        surahHint = nil
+        totalWordsInVerse = matchingEngine
+            .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
+            .normalizedWords
+            .count ?? 0
+        wordsCovered = 0
+        mode = .tracking
+        debugLog("global switch committed \(match.surahNumber):\(match.verseNumber)")
+        return recognizedVerse(from: match)
+    }
+
     private func isImmediateContinuation(
         _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
         currentSurah: Int,
@@ -457,6 +604,93 @@ final class RecitationTracker: @unchecked Sendable {
             return true
         }
         return false
+    }
+
+    private func shouldAcceptNoisySequentialContinuation(
+        match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String,
+        threshold: Double
+    ) -> Bool {
+        guard match.score >= threshold,
+              hasUsefulContinuationContent(transcription) else {
+            return false
+        }
+        guard !hasStrongerCrossSurahAlternative(transcription: transcription, localMatch: match) else {
+            debugLog(
+                "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because a cross-surah alternative is stronger"
+            )
+            return false
+        }
+
+        debugLog(
+            "accepting probable noisy continuation \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score))"
+        )
+        return true
+    }
+
+    private func hasStrongerCrossSurahAlternative(
+        transcription: String,
+        localMatch: QuranVerseMatchingEngine.VerseMatchCandidate
+    ) -> Bool {
+        guard let currentSurah,
+              let globalMatch = matchingEngine.findBestMatch(
+                transcription: transcription,
+                minimumScore: localMatch.score + 0.08,
+                exhaustiveSpanSearch: true
+              ) else {
+            return false
+        }
+
+        return globalMatch.surahNumber != currentSurah
+    }
+
+    private func hasUsefulContinuationContent(_ transcription: String) -> Bool {
+        let words = ArabicNormalizer.words(transcription)
+        let characterCount = words.reduce(0) { $0 + $1.count }
+        return words.count >= 2 && characterCount >= 5
+    }
+
+    private func hasUsefulGlobalSwitchContent(_ transcription: String) -> Bool {
+        let words = ArabicNormalizer.words(transcription)
+        let characterCount = words.reduce(0) { $0 + $1.count }
+        return words.count >= 3 && characterCount >= 10
+    }
+
+    private func isGenericOpeningOrPraisePhrase(_ transcription: String) -> Bool {
+        let genericStems: Set<String> = ["بسم", "اسم", "الله", "رحمن", "رحيم", "حمد", "رب", "عالم"]
+        let contentStems = ArabicNormalizer.words(transcription)
+            .map(evidenceStem)
+            .filter { $0.count >= 3 }
+
+        guard !contentStems.isEmpty else { return true }
+        return contentStems.allSatisfy { genericStems.contains($0) }
+    }
+
+    private func distinctiveEvidenceHitCount(
+        referenceText: String,
+        transcription: String
+    ) -> Int {
+        let queryStems = Set(
+            ArabicNormalizer.words(transcription)
+                .map(evidenceStem)
+                .filter { $0.count >= 3 }
+        )
+        let referenceStems = ArabicNormalizer.words(referenceText)
+            .map(evidenceStem)
+            .filter { $0.count >= 3 }
+
+        var hits = 0
+        for queryStem in queryStems {
+            if referenceStems.contains(queryStem) {
+                hits += 1
+                continue
+            }
+
+            if referenceStems.contains(where: { LevenshteinMatcher.ratio(queryStem, $0) >= 0.78 }) {
+                hits += 1
+            }
+        }
+        return hits
     }
 
     private func hasContinuationWordEvidence(
@@ -477,21 +711,32 @@ final class RecitationTracker: @unchecked Sendable {
         referenceText: String,
         transcription: String
     ) -> Bool {
-        let transcribedWords = ArabicNormalizer.words(transcription)
-        let referenceWords = ArabicNormalizer.words(referenceText)
-        guard !transcribedWords.isEmpty, !referenceWords.isEmpty else { return false }
+        distinctiveEvidenceHitCount(
+            referenceText: referenceText,
+            transcription: transcription
+        ) >= 2
+    }
 
-        for transcribedWord in transcribedWords where transcribedWord.count >= 4 {
-            for referenceWord in referenceWords where referenceWord.count >= 4 {
-                let transcribedStem = evidenceStem(transcribedWord)
-                let referenceStem = evidenceStem(referenceWord)
-                guard transcribedStem.count >= 3, referenceStem.count >= 3 else { continue }
+    private func hasStrongSingleContinuationEvidence(
+        referenceText: String,
+        transcription: String
+    ) -> Bool {
+        let queryStems = ArabicNormalizer.words(transcription)
+            .map(evidenceStem)
+            .filter { $0.count >= 5 }
+        let referenceStems = ArabicNormalizer.words(referenceText)
+            .map(evidenceStem)
+            .filter { $0.count >= 5 }
 
-                let fullScore = LevenshteinMatcher.ratio(transcribedStem, referenceStem)
-                let partialScore = LevenshteinMatcher.partialRatio(transcribedStem, referenceStem)
-                if fullScore >= 0.70 || partialScore >= 0.75 {
-                    return true
-                }
+        guard !queryStems.isEmpty, !referenceStems.isEmpty else { return false }
+
+        for queryStem in queryStems {
+            if referenceStems.contains(queryStem) {
+                return true
+            }
+
+            if referenceStems.contains(where: { LevenshteinMatcher.ratio(queryStem, $0) >= 0.78 }) {
+                return true
             }
         }
 
@@ -508,12 +753,12 @@ final class RecitationTracker: @unchecked Sendable {
         } else if result.hasPrefix("ال"), result.count > 3 {
             result.removeFirst(2)
         } else if let first = result.first,
-                  ["و", "ف", "ب", "ل"].contains(first),
+                  ["و", "ف", "ب", "ل", "ي", "ت", "ن"].contains(first),
                   result.count > 4 {
             result.removeFirst()
         }
 
-        for suffix in ["ين", "ون", "ان", "هم", "كم", "نا", "ها", "ه"] {
+        for suffix in ["ين", "ون", "ان", "وا", "هم", "كم", "نا", "ها", "ه"] {
             if result.hasSuffix(suffix), result.count - suffix.count >= 3 {
                 result.removeLast(suffix.count)
                 break
