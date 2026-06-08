@@ -94,7 +94,7 @@ import Testing
     #expect(next.verseNumber == 3)
 }
 
-@Test func completedShortAyahEmitsCompletedAyahAndPreparesNextAyah() throws {
+@Test func completedShortAyahEmitsNextAyahForReaderCue() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine)
 
@@ -102,9 +102,23 @@ import Testing
     let completed = try #require(tracker.processTranscription("الرَّحْمَنِ الرَّحِيمِ"))
 
     #expect(completed.surahNumber == 1)
-    #expect(completed.verseNumber == 3)
+    #expect(completed.verseNumber == 4)
     #expect(tracker.currentSurah == 1)
     #expect(tracker.currentVerse == 4)
+}
+
+@Test func currentAyahLastWordEmitsNextAyahForReaderCue() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    _ = try #require(tracker.processTranscription("بسم الله الرحمن الرحيم"))
+    _ = try #require(tracker.processTranscription("الحمد لله رب"))
+    let next = try #require(tracker.processTranscription("العالمين"))
+
+    #expect(next.surahNumber == 1)
+    #expect(next.verseNumber == 3)
+    #expect(tracker.currentSurah == 1)
+    #expect(tracker.currentVerse == 3)
 }
 
 @Test func stalePreviousAyahAfterAutoAdvanceDoesNotMoveBackwards() throws {
@@ -134,7 +148,7 @@ import Testing
 
     let completedSecond = try #require(tracker.processTranscription("الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ"))
     #expect(completedSecond.surahNumber == 1)
-    #expect(completedSecond.verseNumber == 2)
+    #expect(completedSecond.verseNumber == 3)
     #expect(tracker.currentSurah == 1)
     #expect(tracker.currentVerse == 3)
 
@@ -200,6 +214,21 @@ import Testing
     let switched = try #require(tracker.processTranscription("قُلْ أَعُوذُ بِرَبِّ النَّاسِ"))
     #expect(switched.surahNumber == 114)
     #expect(switched.verseNumber == 1)
+}
+
+@Test func endOfSurahSwitchesToDistinctiveNewSurahOpeningWithoutMissDelay() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    _ = try #require(tracker.processTranscription("اهدنا الصراط المستقيم"))
+    _ = try #require(tracker.processTranscription("صراط الذين انعمت عليهم غير المغضوب عليهم ولا الضالين"))
+
+    let switched = try #require(tracker.processTranscription("ن والقلم وما يسطرون"))
+
+    #expect(switched.surahNumber == 68)
+    #expect(switched.verseNumber == 1)
+    #expect(tracker.currentSurah == 68)
+    #expect(tracker.currentVerse == 1)
 }
 
 @Test func lowInformationTrackingNoiseDoesNotLoseCurrentVerse() throws {
