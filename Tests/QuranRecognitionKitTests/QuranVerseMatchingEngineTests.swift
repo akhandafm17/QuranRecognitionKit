@@ -164,6 +164,29 @@ import Testing
     #expect(fifth.verseNumber == 5)
 }
 
+@Test func discoveryResolvesFatihahSpanStartToContainedAyahFromLog() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    let verse = try #require(tracker.processTranscription("عبد وإياك فاستعين"))
+
+    #expect(verse.surahNumber == 1)
+    #expect(verse.verseNumber == 5)
+    #expect(tracker.currentSurah == 1)
+    #expect(tracker.currentVerse == 5)
+}
+
+@Test func sameSurahHighConfidenceForwardJumpDoesNotWaitForSecondConfirmation() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    _ = try #require(tracker.processTranscription("مالك يوم الدين"))
+    let sixth = try #require(tracker.processTranscription("اهدنا الصراط المستقم"))
+
+    #expect(sixth.surahNumber == 1)
+    #expect(sixth.verseNumber == 6)
+}
+
 @Test func trackingCanSwitchSurahOnHighConfidenceGlobalMatchFromLog() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)

@@ -126,10 +126,11 @@ final class RecitationTracker: @unchecked Sendable {
                 debugLog("no candidate matched")
                 return nil
             }
+            let effectiveMatch = resolveDiscoverySpan(match, transcription: transcription)
             debugLog(
                 "candidate \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score)) ayahEnd=\(match.ayahEnd.map(String.init) ?? "nil")"
             )
-            return handleDiscoveryMatch(match, transcription: transcription)
+            return handleDiscoveryMatch(effectiveMatch, transcription: transcription)
         case .tracking:
             guard let match else {
                 debugLog("no scoped candidate matched")
@@ -372,13 +373,15 @@ final class RecitationTracker: @unchecked Sendable {
                 referenceText: effectiveMatch.normalizedText,
                 transcription: transcription
             )
-            let isProbableNoisyContinuation = shouldAcceptNoisySequentialContinuation(
+            let primaryAccepted = effectiveMatch.score >= immediateContinuationThreshold &&
+                (hasWordEvidence || hasStrongSingleEvidence)
+            let accepted = primaryAccepted || shouldAcceptNoisySequentialContinuationIfNeeded(
+                primaryAccepted: primaryAccepted,
                 match: effectiveMatch,
                 transcription: transcription,
                 threshold: probableSpanContinuationThreshold
             )
-            guard (effectiveMatch.score >= immediateContinuationThreshold && (hasWordEvidence || hasStrongSingleEvidence)) ||
-                    isProbableNoisyContinuation else {
+            guard accepted else {
                 debugLog(
                     "resolved span continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
                 )
@@ -396,13 +399,15 @@ final class RecitationTracker: @unchecked Sendable {
                 referenceText: effectiveMatch.normalizedText,
                 transcription: transcription
             )
-            let isProbableNoisyContinuation = shouldAcceptNoisySequentialContinuation(
+            let primaryAccepted = effectiveMatch.score >= immediateContinuationThreshold &&
+                (hasWordEvidence || hasStrongSingleEvidence)
+            let accepted = primaryAccepted || shouldAcceptNoisySequentialContinuationIfNeeded(
+                primaryAccepted: primaryAccepted,
                 match: effectiveMatch,
                 transcription: transcription,
                 threshold: probableImmediateContinuationThreshold
             )
-            guard (effectiveMatch.score >= immediateContinuationThreshold && (hasWordEvidence || hasStrongSingleEvidence)) ||
-                    isProbableNoisyContinuation else {
+            guard accepted else {
                 debugLog(
                     "immediate continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
                 )
@@ -418,6 +423,17 @@ final class RecitationTracker: @unchecked Sendable {
 
             resetLowConfidenceContinuation()
             debugLog("immediate continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) wordEvidence=\(hasWordEvidence)")
+            return advance(to: effectiveMatch)
+        }
+
+        if isHighConfidenceSameSurahForwardJump(
+            effectiveMatch,
+            currentSurah: currentSurah,
+            currentVerse: currentVerse,
+            transcription: transcription
+        ) {
+            resetLowConfidenceContinuation()
+            debugLog("high-confidence same-surah jump to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
             return advance(to: effectiveMatch)
         }
 
@@ -438,6 +454,42 @@ final class RecitationTracker: @unchecked Sendable {
         debugLog("jump pending \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
         guard consecutiveCount >= requiredConsecutiveJump else { return nil }
         return advance(to: effectiveMatch)
+    }
+
+    private func resolveDiscoverySpan(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate {
+        guard let ayahEnd = match.ayahEnd,
+              ayahEnd > match.verseNumber else {
+            return match
+        }
+
+        guard match.verseNumber > 1 else {
+            return match
+        }
+
+        if let startEntry = matchingEngine.getVerse(surah: match.surahNumber, verse: match.verseNumber),
+           hasReferenceWordEvidence(referenceText: startEntry.normalizedText, transcription: transcription) ||
+            hasStrongSingleContinuationEvidence(referenceText: startEntry.normalizedText, transcription: transcription) {
+            return match
+        }
+
+        guard let resolved = matchingEngine.bestContainedVerse(
+            transcription: transcription,
+            in: match
+        ) else {
+            return match
+        }
+
+        guard resolved.verseNumber != match.verseNumber || resolved.ayahEnd != match.ayahEnd else {
+            return match
+        }
+
+        debugLog(
+            "resolved discovery span \(match.surahNumber):\(match.verseNumber)-\(ayahEnd) to \(resolved.surahNumber):\(resolved.verseNumber) score=\(String(format: "%.3f", resolved.score))"
+        )
+        return resolved
     }
 
     private func resolveTrackingSpan(
@@ -604,6 +656,37 @@ final class RecitationTracker: @unchecked Sendable {
             return true
         }
         return false
+    }
+
+    private func isHighConfidenceSameSurahForwardJump(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        currentSurah: Int,
+        currentVerse: Int,
+        transcription: String
+    ) -> Bool {
+        guard match.surahNumber == currentSurah,
+              match.verseNumber > currentVerse + 1,
+              match.verseNumber <= currentVerse + 3,
+              match.score >= 0.92 else {
+            return false
+        }
+
+        return hasContinuationWordEvidence(match: match, transcription: transcription) ||
+            hasStrongSingleContinuationEvidence(referenceText: match.normalizedText, transcription: transcription)
+    }
+
+    private func shouldAcceptNoisySequentialContinuationIfNeeded(
+        primaryAccepted: Bool,
+        match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String,
+        threshold: Double
+    ) -> Bool {
+        guard !primaryAccepted else { return false }
+        return shouldAcceptNoisySequentialContinuation(
+            match: match,
+            transcription: transcription,
+            threshold: threshold
+        )
     }
 
     private func shouldAcceptNoisySequentialContinuation(

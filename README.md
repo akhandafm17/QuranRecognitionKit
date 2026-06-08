@@ -48,13 +48,13 @@ In Xcode:
 
 1. Choose `File > Add Package Dependencies`.
 2. Enter `https://github.com/akhandafm17/QuranRecognitionKit.git`.
-3. Select version `0.1.6` or newer.
+3. Select version `0.1.7` or newer.
 4. Add the `QuranRecognitionKit` product to the app target.
 
 In a Swift package manifest:
 
 ```swift
-.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.6")
+.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.7")
 ```
 
 The package requires iOS 17 or newer.
