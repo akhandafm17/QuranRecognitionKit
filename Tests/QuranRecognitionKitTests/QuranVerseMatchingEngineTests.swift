@@ -94,15 +94,17 @@ import Testing
     #expect(next.verseNumber == 3)
 }
 
-@Test func completedShortAyahEmitsAutoAdvancedNextAyah() throws {
+@Test func completedShortAyahEmitsCompletedAyahAndPreparesNextAyah() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine)
 
     _ = try #require(tracker.processTranscription("الرحمن الرحيم"))
-    let next = try #require(tracker.processTranscription("الرَّحْمَنِ الرَّحِيمِ"))
+    let completed = try #require(tracker.processTranscription("الرَّحْمَنِ الرَّحِيمِ"))
 
-    #expect(next.surahNumber == 1)
-    #expect(next.verseNumber == 4)
+    #expect(completed.surahNumber == 1)
+    #expect(completed.verseNumber == 3)
+    #expect(tracker.currentSurah == 1)
+    #expect(tracker.currentVerse == 4)
 }
 
 @Test func stalePreviousAyahAfterAutoAdvanceDoesNotMoveBackwards() throws {
@@ -116,6 +118,33 @@ import Testing
     #expect(tracker.processTranscription("الرَّحْمَنِ الرَّحِيمُ") == nil)
     #expect(tracker.currentSurah == 1)
     #expect(tracker.currentVerse == 4)
+}
+
+@Test func fatihahTrackingResolvesForwardSpansToRecitedAyah() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 1)
+
+    let first = try #require(tracker.processTranscription("بسم الله الرحمن الرحيم"))
+    #expect(first.surahNumber == 1)
+    #expect(first.verseNumber == 1)
+
+    let second = try #require(tracker.processTranscription("رب العالمين العالمين"))
+    #expect(second.surahNumber == 1)
+    #expect(second.verseNumber == 2)
+
+    let completedSecond = try #require(tracker.processTranscription("الْحَمْدُ لِلَّهِ رَبِّ الْعَالَمِينَ"))
+    #expect(completedSecond.surahNumber == 1)
+    #expect(completedSecond.verseNumber == 2)
+    #expect(tracker.currentSurah == 1)
+    #expect(tracker.currentVerse == 3)
+
+    let sixth = try #require(tracker.processTranscription("اهدنا صراطك المستقيم"))
+    #expect(sixth.surahNumber == 1)
+    #expect(sixth.verseNumber == 6)
+
+    let seventh = try #require(tracker.processTranscription("صراط الذين أنعمت عليهم"))
+    #expect(seventh.surahNumber == 1)
+    #expect(seventh.verseNumber == 7)
 }
 
 @Test func lowInformationTrackingNoiseDoesNotLoseCurrentVerse() throws {

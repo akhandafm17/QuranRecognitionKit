@@ -304,11 +304,16 @@ final class RecitationTracker: @unchecked Sendable {
            match.verseNumber <= currentVerse,
            spanEnd > currentVerse,
            let nextEntry = matchingEngine.getVerse(surah: currentSurah, verse: currentVerse + 1) {
-            debugLog("span continuation \(match.verseNumber)-\(spanEnd), advancing to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
-            return advance(to: nextEntry, confidence: match.score)
+            if hasVerseWordEvidence(entry: nextEntry, transcription: transcription) {
+                debugLog("span continuation \(match.verseNumber)-\(spanEnd), advancing to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
+                return advance(to: nextEntry, confidence: match.score)
+            }
+            debugLog("span continuation \(match.verseNumber)-\(spanEnd) rejected without next-ayah word evidence")
         }
 
-        if match.surahNumber == currentSurah && match.verseNumber == currentVerse {
+        let effectiveMatch = resolveTrackingSpan(match, transcription: transcription)
+
+        if effectiveMatch.surahNumber == currentSurah && effectiveMatch.verseNumber == currentVerse {
             let autoAdvancedVerse = updateWordCoverage(transcription: transcription, surah: currentSurah, verse: currentVerse)
             pendingSurah = nil
             pendingVerse = nil
@@ -323,24 +328,43 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
-        if match.surahNumber == currentSurah && match.verseNumber < currentVerse {
+        if effectiveMatch.surahNumber == currentSurah && effectiveMatch.verseNumber < currentVerse {
             pendingSurah = nil
             pendingVerse = nil
             consecutiveCount = 0
             resetLowConfidenceContinuation()
             missedTrackingCount = 0
             lowInformationTrackingCount = 0
-            debugLog("ignoring stale previous verse \(match.surahNumber):\(match.verseNumber) while tracking \(currentSurah):\(currentVerse)")
+            debugLog("ignoring stale previous verse \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) while tracking \(currentSurah):\(currentVerse)")
             return nil
         }
 
-        if isImmediateContinuation(match, currentSurah: currentSurah, currentVerse: currentVerse) {
-            guard match.score >= immediateContinuationThreshold,
-                  hasContinuationWordEvidence(match: match, transcription: transcription) else {
+        if isResolvedForwardSpanContinuation(
+            originalMatch: match,
+            resolvedMatch: effectiveMatch,
+            currentSurah: currentSurah,
+            currentVerse: currentVerse
+        ) {
+            guard effectiveMatch.score >= immediateContinuationThreshold,
+                  hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription) else {
                 debugLog(
-                    "immediate continuation rejected score=\(String(format: "%.3f", match.score)) threshold=\(immediateContinuationThreshold)"
+                    "resolved span continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
                 )
-                switch registerLowConfidenceShortVerseContinuation(match: match, transcription: transcription) {
+                return handleTrackingMiss(transcription: transcription)
+            }
+
+            resetLowConfidenceContinuation()
+            debugLog("resolved span continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
+            return advance(to: effectiveMatch)
+        }
+
+        if isImmediateContinuation(effectiveMatch, currentSurah: currentSurah, currentVerse: currentVerse) {
+            guard effectiveMatch.score >= immediateContinuationThreshold,
+                  hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription) else {
+                debugLog(
+                    "immediate continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
+                )
+                switch registerLowConfidenceShortVerseContinuation(match: effectiveMatch, transcription: transcription) {
                 case .accepted(let verse):
                     return verse
                 case .pending:
@@ -349,28 +373,79 @@ final class RecitationTracker: @unchecked Sendable {
                     return handleTrackingMiss(transcription: transcription)
                 }
             }
+
             resetLowConfidenceContinuation()
-            debugLog("immediate continuation to \(match.surahNumber):\(match.verseNumber)")
-            return advance(to: match)
+            debugLog("immediate continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
+            return advance(to: effectiveMatch)
         }
 
-        guard match.score >= jumpThreshold else {
+        guard effectiveMatch.score >= jumpThreshold else {
             resetLowConfidenceContinuation()
-            debugLog("candidate below jump threshold score=\(String(format: "%.3f", match.score)) threshold=\(jumpThreshold)")
+            debugLog("candidate below jump threshold score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(jumpThreshold)")
             return handleTrackingMiss(transcription: transcription)
         }
 
-        if match.surahNumber == pendingSurah && match.verseNumber == pendingVerse {
+        if effectiveMatch.surahNumber == pendingSurah && effectiveMatch.verseNumber == pendingVerse {
             consecutiveCount += 1
         } else {
-            pendingSurah = match.surahNumber
-            pendingVerse = match.verseNumber
+            pendingSurah = effectiveMatch.surahNumber
+            pendingVerse = effectiveMatch.verseNumber
             consecutiveCount = 1
         }
 
-        debugLog("jump pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
+        debugLog("jump pending \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
         guard consecutiveCount >= requiredConsecutiveJump else { return nil }
-        return advance(to: match)
+        return advance(to: effectiveMatch)
+    }
+
+    private func resolveTrackingSpan(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate {
+        guard let ayahEnd = match.ayahEnd,
+              ayahEnd > match.verseNumber,
+              let currentSurah,
+              match.surahNumber == currentSurah else {
+            return match
+        }
+
+        guard let resolved = matchingEngine.bestContainedVerse(
+            transcription: transcription,
+            in: match
+        ) else {
+            return match
+        }
+
+        guard resolved.verseNumber != match.verseNumber || resolved.ayahEnd != match.ayahEnd else {
+            return match
+        }
+
+        debugLog(
+            "resolved span \(match.surahNumber):\(match.verseNumber)-\(ayahEnd) to \(resolved.surahNumber):\(resolved.verseNumber) score=\(String(format: "%.3f", resolved.score))"
+        )
+        return resolved
+    }
+
+    private func isResolvedForwardSpanContinuation(
+        originalMatch: QuranVerseMatchingEngine.VerseMatchCandidate,
+        resolvedMatch: QuranVerseMatchingEngine.VerseMatchCandidate,
+        currentSurah: Int,
+        currentVerse: Int
+    ) -> Bool {
+        guard originalMatch.ayahEnd != nil,
+              resolvedMatch.surahNumber == currentSurah,
+              resolvedMatch.verseNumber > currentVerse,
+              resolvedMatch.verseNumber <= currentVerse + 3 else {
+            return false
+        }
+
+        if originalMatch.verseNumber <= currentVerse,
+           let spanEnd = originalMatch.ayahEnd,
+           spanEnd > currentVerse {
+            return true
+        }
+
+        return originalMatch.verseNumber == currentVerse + 1
     }
 
     private func isImmediateContinuation(
@@ -388,8 +463,22 @@ final class RecitationTracker: @unchecked Sendable {
         match: QuranVerseMatchingEngine.VerseMatchCandidate,
         transcription: String
     ) -> Bool {
+        hasReferenceWordEvidence(referenceText: match.normalizedText, transcription: transcription)
+    }
+
+    private func hasVerseWordEvidence(
+        entry: QuranVerseMatchingEngine.VerseEntry,
+        transcription: String
+    ) -> Bool {
+        hasReferenceWordEvidence(referenceText: entry.normalizedText, transcription: transcription)
+    }
+
+    private func hasReferenceWordEvidence(
+        referenceText: String,
+        transcription: String
+    ) -> Bool {
         let transcribedWords = ArabicNormalizer.words(transcription)
-        let referenceWords = ArabicNormalizer.words(match.normalizedText)
+        let referenceWords = ArabicNormalizer.words(referenceText)
         guard !transcribedWords.isEmpty, !referenceWords.isEmpty else { return false }
 
         for transcribedWord in transcribedWords where transcribedWord.count >= 4 {
@@ -608,6 +697,13 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
+        let completedVerse = RecognizedVerse(
+            surahNumber: entry.surahNumber,
+            verseNumber: entry.verseNumber,
+            ayahEnd: nil,
+            confidence: coverage,
+            arabicText: entry.arabicText
+        )
         currentSurah = nextEntry.surahNumber
         currentVerse = nextEntry.verseNumber
         wordsCovered = 0
@@ -616,13 +712,7 @@ final class RecitationTracker: @unchecked Sendable {
         missedTrackingCount = 0
         lowInformationTrackingCount = 0
         debugLog("auto-advanced internally to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
-        return RecognizedVerse(
-            surahNumber: nextEntry.surahNumber,
-            verseNumber: nextEntry.verseNumber,
-            ayahEnd: nil,
-            confidence: coverage,
-            arabicText: nextEntry.arabicText
-        )
+        return completedVerse
     }
 
     private func advance(to match: QuranVerseMatchingEngine.VerseMatchCandidate) -> RecognizedVerse {

@@ -230,6 +230,47 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         return false
     }
 
+    func bestContainedVerse(
+        transcription: String,
+        in candidate: VerseMatchCandidate
+    ) -> VerseMatchCandidate? {
+        guard let ayahEnd = candidate.ayahEnd,
+              ayahEnd > candidate.verseNumber else {
+            return candidate
+        }
+
+        let normalizedTranscription = ArabicNormalizer.normalize(transcription)
+        guard !normalizedTranscription.isEmpty else { return candidate }
+
+        var bestEntry: VerseEntry?
+        var bestScore = 0.0
+
+        for verseNumber in candidate.verseNumber...ayahEnd {
+            guard let entry = getVerse(surah: candidate.surahNumber, verse: verseNumber) else {
+                continue
+            }
+
+            let score = scoreEntryDirect(
+                normalizedTranscription: normalizedTranscription,
+                entry: entry
+            )
+            if score > bestScore {
+                bestScore = score
+                bestEntry = entry
+            }
+        }
+
+        guard let bestEntry else { return candidate }
+        return VerseMatchCandidate(
+            surahNumber: bestEntry.surahNumber,
+            verseNumber: bestEntry.verseNumber,
+            ayahEnd: nil,
+            arabicText: bestEntry.arabicText,
+            normalizedText: bestEntry.normalizedText,
+            score: max(bestScore, candidate.score)
+        )
+    }
+
     private func findBestMatch(
         transcription: String,
         candidates: [VerseEntry],
@@ -379,6 +420,17 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
             score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
         }
         return min(score + continuationBonus(for: entry, currentSurah: currentSurah, currentVerse: currentVerse), 1.0)
+    }
+
+    private func scoreEntryDirect(
+        normalizedTranscription: String,
+        entry: VerseEntry
+    ) -> Double {
+        var score = LevenshteinMatcher.ratio(normalizedTranscription, entry.normalizedText)
+        if normalizedTranscription.count >= 12, score > 0.15 {
+            score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
+        }
+        return min(score, 1.0)
     }
 
     private func spanStartEntries(
