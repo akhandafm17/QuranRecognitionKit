@@ -130,13 +130,17 @@ public final class QuranRecognitionSession: @unchecked Sendable {
         let windowSeconds = mode == .tracking
             ? configuration.trackingWindowSeconds
             : configuration.discoveryWindowSeconds
+        let minimumWindowSeconds = mode == .tracking
+            ? configuration.minimumTrackingWindowSeconds
+            : configuration.minimumDiscoveryWindowSeconds
         let windowSamples = Int(windowSeconds * 16_000)
+        let minimumWindowSamples = Int(min(windowSeconds, minimumWindowSeconds) * 16_000)
 
         let samples: [Float]? = bufferLock.withLock {
-            guard audioBuffer.count >= windowSamples else {
+            guard audioBuffer.count >= minimumWindowSamples else {
                 if processingCycleCount % 4 == 0 {
                     recognizer.debugLog(
-                        "waiting for audio mode=\(mode) bufferSamples=\(audioBuffer.count) needed=\(windowSamples)"
+                        "waiting for audio mode=\(mode) bufferSamples=\(audioBuffer.count) needed=\(minimumWindowSamples)"
                     )
                 }
                 return nil
@@ -154,7 +158,7 @@ public final class QuranRecognitionSession: @unchecked Sendable {
             }
 
             samplesReceivedAtLastProcess = totalSamplesReceived
-            return Array(audioBuffer.suffix(windowSamples))
+            return Array(audioBuffer.suffix(min(audioBuffer.count, windowSamples)))
         }
 
         guard let samples else { return }

@@ -48,13 +48,13 @@ In Xcode:
 
 1. Choose `File > Add Package Dependencies`.
 2. Enter `https://github.com/akhandafm17/QuranRecognitionKit.git`.
-3. Select version `0.1.3` or newer.
+3. Select version `0.1.4` or newer.
 4. Add the `QuranRecognitionKit` product to the app target.
 
 In a Swift package manifest:
 
 ```swift
-.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.3")
+.package(url: "https://github.com/akhandafm17/QuranRecognitionKit.git", from: "0.1.4")
 ```
 
 The package requires iOS 17 or newer.
@@ -321,6 +321,8 @@ extension QuranRecognizer {
         public var processingInterval: TimeInterval
         public var discoveryWindowSeconds: Double
         public var trackingWindowSeconds: Double
+        public var minimumDiscoveryWindowSeconds: Double
+        public var minimumTrackingWindowSeconds: Double
         public var maximumBufferedSeconds: Double
         public var intraOpThreadCount: Int
         public var minimumSpeechRMS: Float
@@ -336,7 +338,8 @@ The default streaming setup uses longer rolling windows for stability:
 
 - Discovery: 5 seconds.
 - Tracking: 4 seconds.
-- Fresh audio gate: 1.5 seconds in discovery, 1.25 seconds in tracking.
+- First inference gate: 2.25 seconds in discovery, 2 seconds in tracking.
+- Fresh audio gate after the first inference: 1.5 seconds in discovery, 1.25 seconds in tracking.
 - Audio quality gate: skips silence, very weak speech, and clipped windows before ONNX inference.
 - Transcript quality gate: suppresses short fragments such as single letters from the public `.transcription` event by default.
 

@@ -5,6 +5,8 @@ public final class QuranRecognizer: @unchecked Sendable {
         public var processingInterval: TimeInterval
         public var discoveryWindowSeconds: Double
         public var trackingWindowSeconds: Double
+        public var minimumDiscoveryWindowSeconds: Double
+        public var minimumTrackingWindowSeconds: Double
         public var maximumBufferedSeconds: Double
         public var intraOpThreadCount: Int
         public var minimumSpeechRMS: Float
@@ -17,6 +19,8 @@ public final class QuranRecognizer: @unchecked Sendable {
             processingInterval: TimeInterval = 0.75,
             discoveryWindowSeconds: Double = 5.0,
             trackingWindowSeconds: Double = 4.0,
+            minimumDiscoveryWindowSeconds: Double = 2.25,
+            minimumTrackingWindowSeconds: Double = 2.0,
             maximumBufferedSeconds: Double = 12.0,
             intraOpThreadCount: Int = 2,
             minimumSpeechRMS: Float = 0.0015,
@@ -28,6 +32,8 @@ public final class QuranRecognizer: @unchecked Sendable {
             self.processingInterval = processingInterval
             self.discoveryWindowSeconds = discoveryWindowSeconds
             self.trackingWindowSeconds = trackingWindowSeconds
+            self.minimumDiscoveryWindowSeconds = minimumDiscoveryWindowSeconds
+            self.minimumTrackingWindowSeconds = minimumTrackingWindowSeconds
             self.maximumBufferedSeconds = maximumBufferedSeconds
             self.intraOpThreadCount = intraOpThreadCount
             self.minimumSpeechRMS = minimumSpeechRMS
