@@ -43,7 +43,10 @@ let package = Package(
         ),
         .testTarget(
             name: "QuranRecognitionKitTests",
-            dependencies: ["QuranRecognitionKit"]
+            dependencies: ["QuranRecognitionKit"],
+            resources: [
+                .process("Resources/baqarah_recitation_windows.json")
+            ]
         )
     ]
 )
