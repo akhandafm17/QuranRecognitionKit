@@ -19,6 +19,8 @@ public final class QuranRecognitionSession: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var lastAudioLogSampleCount = 0
     private var processingCycleCount = 0
+    private var stalledInputCycles = 0
+    private var lastStallCheckSampleCount = 0
 
     init(
         recognizer: QuranRecognizer,
@@ -109,6 +111,44 @@ public final class QuranRecognitionSession: @unchecked Sendable {
         }
     }
 
+    /// The microphone delivers buffers continuously while capture is healthy —
+    /// even in a silent room the samples keep arriving. Zero new samples
+    /// across multiple processing cycles means the input tap has stalled
+    /// (broken route, microphone held by another process). Surface that as a
+    /// silence quality event so the host app can show feedback instead of an
+    /// indefinite "listening" state; AudioCapture's watchdog restarts the
+    /// engine in parallel.
+    private func reportStalledAudioInputIfNeeded() {
+        let totalNow = bufferLock.withLock { totalSamplesReceived }
+        if totalNow != lastStallCheckSampleCount {
+            lastStallCheckSampleCount = totalNow
+            stalledInputCycles = 0
+            return
+        }
+
+        stalledInputCycles += 1
+        let cyclesPerReport = max(1, Int((2.0 / configuration.processingInterval).rounded()))
+        guard stalledInputCycles % cyclesPerReport == 0 else { return }
+
+        let stalledSeconds = Double(stalledInputCycles) * configuration.processingInterval
+        recognizer.debugLog(
+            "no audio input for \(String(format: "%.1f", stalledSeconds))s while listening (capture stalled)"
+        )
+        continuation.yield(
+            .audioInput(
+                AudioInputQuality(
+                    rms: 0,
+                    peak: 0,
+                    rmsDecibels: -120,
+                    speechFrameRatio: 0,
+                    windowSeconds: stalledSeconds,
+                    status: .silence,
+                    isSpeechLikely: false
+                )
+            )
+        )
+    }
+
     private func startTimer() {
         let timer = DispatchSource.makeTimerSource(queue: processingQueue)
         timer.schedule(
@@ -125,6 +165,7 @@ public final class QuranRecognitionSession: @unchecked Sendable {
     private func processBufferedAudio() {
         guard !isStopped, !isProcessing else { return }
         processingCycleCount += 1
+        reportStalledAudioInputIfNeeded()
 
         let mode = tracker.mode
         let windowSeconds = mode == .tracking

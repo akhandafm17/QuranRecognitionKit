@@ -361,12 +361,13 @@ The SDK avoids main-thread inference and audio processing:
 - Mel computation reuses FFT setup, Hann window, and mel filterbank.
 - The audio buffer is capped by `maximumBufferedSeconds`.
 - Low-speech audio windows are skipped before ONNX inference.
+- A capture watchdog detects a silent input tap (no buffers while the engine reports running) and automatically restarts the audio engine, logging the active input route for diagnosis.
 - Verse matching uses an evidence index and bounded span search instead of scanning every possible span.
 - Tracking mode searches locally around the current verse before returning to global discovery.
 
 Current validation:
 
-- `swift test` passes on macOS arm64 with 84 tests.
+- `swift test` passes on macOS arm64 with 85 tests.
 - The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
 - Scenario tests (`RecitationScenarioTests`) simulate full recitation sessions across structurally different surahs (Al-Fatihah, Al-Kahf, Al-Mulk, Al-Ikhlas, An-Nas) and recitation styles (clean per-ayah windows, rolling boundary-spanning windows, short fragments, noisy clipped decodes), asserting sequential no-skip/no-regression tracking and per-window latency bounds.
 - Generic iOS package builds pass with `xcodebuild -scheme QuranRecognitionKit-Package -destination 'generic/platform=iOS' build`.
@@ -391,6 +392,10 @@ The ONNX model output vocabulary does not match the bundled `vocab.json`. Use a 
 ### Microphone Permission Errors
 
 Make sure the host app includes `NSMicrophoneUsageDescription`. On device, also check iOS Settings if the user previously denied microphone access.
+
+### Listening Never Produces Transcriptions
+
+If debug logs show `waiting for audio ... bufferSamples=0` repeating after `audio engine started`, the input tap is not delivering buffers even though the engine is running. This is a system audio state issue, not a recognition issue: the microphone may be held by another app or call, the audio route (often Bluetooth) may be broken, or CoreAudio is in a stale state. The SDK restarts the audio engine automatically up to three times and logs the active input route. The session also emits `.audioInput` silence events so the host app can show feedback. If it does not recover: disconnect Bluetooth audio devices, close apps that use the microphone, or restart the device.
 
 ### No Verse Is Detected
 
