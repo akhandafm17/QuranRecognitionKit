@@ -7,6 +7,8 @@ public final class QuranRecognizer: @unchecked Sendable {
         public var trackingWindowSeconds: Double
         public var minimumDiscoveryWindowSeconds: Double
         public var minimumTrackingWindowSeconds: Double
+        public var discoveryFreshAudioSeconds: Double
+        public var trackingFreshAudioSeconds: Double
         public var maximumBufferedSeconds: Double
         public var intraOpThreadCount: Int
         public var minimumSpeechRMS: Float
@@ -16,13 +18,15 @@ public final class QuranRecognizer: @unchecked Sendable {
         public var debugLogging: Bool
 
         public init(
-            processingInterval: TimeInterval = 0.75,
-            discoveryWindowSeconds: Double = 5.0,
-            trackingWindowSeconds: Double = 4.0,
-            minimumDiscoveryWindowSeconds: Double = 2.25,
-            minimumTrackingWindowSeconds: Double = 2.0,
-            maximumBufferedSeconds: Double = 12.0,
-            intraOpThreadCount: Int = 2,
+            processingInterval: TimeInterval = 0.20,
+            discoveryWindowSeconds: Double = 3.5,
+            trackingWindowSeconds: Double = 2.25,
+            minimumDiscoveryWindowSeconds: Double = 1.75,
+            minimumTrackingWindowSeconds: Double = 0.90,
+            discoveryFreshAudioSeconds: Double = 0.30,
+            trackingFreshAudioSeconds: Double = 0.20,
+            maximumBufferedSeconds: Double = 6.0,
+            intraOpThreadCount: Int = 1,
             minimumSpeechRMS: Float = 0.0015,
             minimumSpeechPeak: Float = 0.006,
             minimumSpeechFrameRatio: Double = 0.03,
@@ -34,6 +38,8 @@ public final class QuranRecognizer: @unchecked Sendable {
             self.trackingWindowSeconds = trackingWindowSeconds
             self.minimumDiscoveryWindowSeconds = minimumDiscoveryWindowSeconds
             self.minimumTrackingWindowSeconds = minimumTrackingWindowSeconds
+            self.discoveryFreshAudioSeconds = discoveryFreshAudioSeconds
+            self.trackingFreshAudioSeconds = trackingFreshAudioSeconds
             self.maximumBufferedSeconds = maximumBufferedSeconds
             self.intraOpThreadCount = intraOpThreadCount
             self.minimumSpeechRMS = minimumSpeechRMS

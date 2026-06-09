@@ -121,11 +121,15 @@ let localModelURL = try await downloader.download(
 import QuranRecognitionKit
 
 let configuration = QuranRecognizer.Configuration(
-    processingInterval: 0.75,
-    discoveryWindowSeconds: 5.0,
-    trackingWindowSeconds: 4.0,
-    maximumBufferedSeconds: 12.0,
-    intraOpThreadCount: 2,
+    processingInterval: 0.20,
+    discoveryWindowSeconds: 3.5,
+    trackingWindowSeconds: 2.25,
+    minimumDiscoveryWindowSeconds: 1.75,
+    minimumTrackingWindowSeconds: 0.90,
+    discoveryFreshAudioSeconds: 0.30,
+    trackingFreshAudioSeconds: 0.20,
+    maximumBufferedSeconds: 6.0,
+    intraOpThreadCount: 1,
     minimumSpeechRMS: 0.0015,
     minimumSpeechPeak: 0.006,
     minimumSpeechFrameRatio: 0.03,
@@ -323,6 +327,8 @@ extension QuranRecognizer {
         public var trackingWindowSeconds: Double
         public var minimumDiscoveryWindowSeconds: Double
         public var minimumTrackingWindowSeconds: Double
+        public var discoveryFreshAudioSeconds: Double
+        public var trackingFreshAudioSeconds: Double
         public var maximumBufferedSeconds: Double
         public var intraOpThreadCount: Int
         public var minimumSpeechRMS: Float
@@ -334,12 +340,14 @@ extension QuranRecognizer {
 }
 ```
 
-The default streaming setup uses longer rolling windows for stability:
+The default streaming setup is tuned for mobile responsiveness while keeping rolling windows for recognition stability:
 
-- Discovery: 5 seconds.
-- Tracking: 4 seconds.
-- First inference gate: 2.25 seconds in discovery, 2 seconds in tracking.
-- Fresh audio gate after the first inference: 1.5 seconds in discovery, 1.25 seconds in tracking.
+- Processing cadence: 200 ms. Inference is serialized, so slow devices skip overlapping cycles instead of piling up work.
+- Discovery window: 3.5 seconds.
+- Tracking window: 2.25 seconds.
+- First inference gate: 1.75 seconds in discovery, 0.9 seconds in tracking.
+- Fresh audio gate after the first inference: 300 ms in discovery and 200 ms in tracking.
+- ONNX thread count: 1 by default to avoid CPU contention and UI stutter on phones.
 - Audio quality gate: skips silence, very weak speech, and clipped windows before ONNX inference.
 - Transcript quality gate: suppresses short fragments such as single letters from the public `.transcription` event by default.
 
@@ -358,8 +366,9 @@ The SDK avoids main-thread inference and audio processing:
 
 Current validation:
 
-- `swift test` passes on macOS arm64 with 33 tests.
+- `swift test` passes on macOS arm64 with 84 tests.
 - The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
+- Scenario tests (`RecitationScenarioTests`) simulate full recitation sessions across structurally different surahs (Al-Fatihah, Al-Kahf, Al-Mulk, Al-Ikhlas, An-Nas) and recitation styles (clean per-ayah windows, rolling boundary-spanning windows, short fragments, noisy clipped decodes), asserting sequential no-skip/no-regression tracking and per-window latency bounds.
 - Generic iOS package builds pass with `xcodebuild -scheme QuranRecognitionKit-Package -destination 'generic/platform=iOS' build`.
 - App-side iOS generic builds passed with this package integrated.
 
@@ -417,6 +426,7 @@ Current tests cover:
 - Levenshtein distance and word alignment.
 - Verse matching.
 - Recitation tracking, surah hints, post-completion discovery, and recovery.
+- Regression cases replayed from real on-device recitation logs (premature next-ayah advances, garbled rolling-window decodes, ending-word stem collisions, multi-ayah span resolution).
 - Resource loading.
 - Model path validation.
 - Recognition session start/stop lifecycle with a mock capture source.

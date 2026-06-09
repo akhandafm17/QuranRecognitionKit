@@ -117,17 +117,21 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         surahHint: Int? = nil,
         minimumScore: Double? = nil,
         minimumVerseInSurahHint: Int? = nil,
-        exhaustiveSpanSearch: Bool = false
+        exhaustiveSpanSearch: Bool = false,
+        allowGlobalFallbackFromSurahHint: Bool = true
     ) -> VerseMatchCandidate? {
-        if let surahHint,
-           let scoped = findBestMatchInSurah(
-            transcription: transcription,
-            surahNumber: surahHint,
-            minimumScore: minimumScore,
-            minimumVerse: minimumVerseInSurahHint,
-            exhaustiveSpanSearch: exhaustiveSpanSearch
-           ) {
-            return scoped
+        if let surahHint {
+            let scoped = findBestMatchInSurah(
+                transcription: transcription,
+                surahNumber: surahHint,
+                minimumScore: minimumScore,
+                minimumVerse: minimumVerseInSurahHint,
+                exhaustiveSpanSearch: exhaustiveSpanSearch
+            )
+            if let scoped {
+                return scoped
+            }
+            guard allowGlobalFallbackFromSurahHint else { return nil }
         }
 
         return findBestMatch(
@@ -220,7 +224,8 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
                 normalizedTranscription: normalizedTranscription,
                 entry: entry,
                 currentSurah: nil,
-                currentVerse: nil
+                currentVerse: nil,
+                queryWords: queryWords
             )
             if score >= candidate.score - scoreTolerance {
                 return true
@@ -296,7 +301,8 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
                 normalizedTranscription: normalizedTranscription,
                 entry: entry,
                 currentSurah: currentSurah,
-                currentVerse: currentVerse
+                currentVerse: currentVerse,
+                queryWords: queryWords
             )
             scored.append((entry, score))
         }
@@ -317,7 +323,11 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
             bestScore = first.score
         }
 
-        if maxSpan > 1 {
+        let shouldSearchNeighborSpans = exhaustiveSpanSearch ||
+            currentSurah != nil ||
+            currentVerse != nil ||
+            bestScore < 0.72
+        if maxSpan > 1, shouldSearchNeighborSpans {
             let topCount = min(scored.count, 20)
             for entry in spanStartEntries(from: scored, topCount: topCount, maxSpan: maxSpan) {
                 for spanLength in 2...maxSpan {
@@ -331,10 +341,21 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
                         normalizedTranscription,
                         combined.normalizedText
                     )
-                    spanScore = max(
-                        spanScore,
-                        fragmentScore(transcription: normalizedTranscription, reference: combined.normalizedText)
-                    )
+                    let shouldUseFullSpanFragment = exhaustiveSpanSearch ||
+                        currentSurah != nil ||
+                        currentVerse != nil ||
+                        candidates.count > 200
+                    if shouldUseFullSpanFragment || shouldUseFragmentScore(
+                        baseScore: spanScore,
+                        normalizedTranscription: normalizedTranscription,
+                        queryWords: queryWords,
+                        reference: combined.normalizedText
+                    ) {
+                        spanScore = max(
+                            spanScore,
+                            fragmentScore(transcription: normalizedTranscription, reference: combined.normalizedText)
+                        )
+                    }
                     spanScore = min(
                         spanScore + continuationBonus(
                             for: entry,
@@ -413,10 +434,29 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         normalizedTranscription: String,
         entry: VerseEntry,
         currentSurah: Int?,
-        currentVerse: Int?
+        currentVerse: Int?,
+        queryWords: Set<String> = []
     ) -> Double {
         var score = LevenshteinMatcher.ratio(normalizedTranscription, entry.normalizedText)
-        if normalizedTranscription.count >= 20, score > 0.25 {
+        // Tracking windows can be as short as one second, so scoped queries are
+        // often 2-4 word mid-verse fragments. When we already know which verses
+        // we are comparing against (tracking mode), allow partial-ratio scoring
+        // for much shorter fragments so they match the current verse instead of
+        // accumulating tracking misses.
+        let scopedQueryWordCount = normalizedTranscription.split(separator: " ").count
+        let shouldUseScopedFragment = (currentSurah != nil || currentVerse != nil) &&
+            scopedQueryWordCount >= 2 &&
+            normalizedTranscription.count >= 8 &&
+            score > 0.2
+        let shouldUseDiscoveryFragment = normalizedTranscription.count >= 20 &&
+            score > 0.25 &&
+            shouldUseEntryFragmentScore(
+                baseScore: score,
+                normalizedTranscription: normalizedTranscription,
+                queryWords: queryWords,
+                reference: entry.normalizedText
+            )
+        if shouldUseScopedFragment || shouldUseDiscoveryFragment {
             score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
         }
         return min(score + continuationBonus(for: entry, currentSurah: currentSurah, currentVerse: currentVerse), 1.0)
@@ -427,10 +467,28 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         entry: VerseEntry
     ) -> Double {
         var score = LevenshteinMatcher.ratio(normalizedTranscription, entry.normalizedText)
-        if normalizedTranscription.count >= 12, score > 0.15 {
+        // Plain ratios bias short fragments toward shorter ayahs (a fragment of
+        // a long ayah's opening can score higher against the short ayah after
+        // it). Use partial-ratio scoring for any multi-word fragment so span
+        // resolution picks the ayah that actually contains the words.
+        let wordCount = normalizedTranscription.split(separator: " ").count
+        // Keep the character gate low (6): tracker guards compare short
+        // decodes like "ان يعلم" (7 chars) against long current ayahs, and the
+        // plain-ratio fallback wrongly favors shorter forward ayahs for them.
+        if wordCount >= 2, normalizedTranscription.count >= 6, score > 0.15 {
             score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
         }
         return min(score, 1.0)
+    }
+
+    /// Scores a transcription directly against one specific verse, without
+    /// continuation bonuses. Used by the tracker to check whether the current
+    /// ayah explains a window at least as well as a proposed continuation.
+    func directVerseScore(transcription: String, surah: Int, verse: Int) -> Double {
+        guard let entry = getVerse(surah: surah, verse: verse) else { return 0 }
+        let normalized = ArabicNormalizer.normalize(transcription)
+        guard !normalized.isEmpty else { return 0 }
+        return scoreEntryDirect(normalizedTranscription: normalized, entry: entry)
     }
 
     private func spanStartEntries(
@@ -473,24 +531,60 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
     }
 
     private func narrowedCandidates(from candidates: [VerseEntry], queryWords: Set<String>) -> [VerseEntry] {
-        guard candidates.count > 200, queryWords.count >= 2 else {
+        guard candidates.count > 24, queryWords.count >= 2 else {
             return candidates
         }
 
         var narrowed: [VerseEntry] = []
+        narrowed.reserveCapacity(min(candidates.count, 64))
+        let candidateKeys = Set(candidates.map { VerseKey(surah: $0.surahNumber, ayah: $0.verseNumber) })
         var seen = Set<VerseKey>()
 
         for word in queryWords {
             guard let entries = evidenceLookup[word] else { continue }
             for entry in entries {
                 let key = VerseKey(surah: entry.surahNumber, ayah: entry.verseNumber)
-                if seen.insert(key).inserted {
-                    narrowed.append(entry)
+                guard candidateKeys.contains(key), seen.insert(key).inserted else {
+                    continue
                 }
+                narrowed.append(entry)
             }
         }
 
-        return narrowed
+        if narrowed.isEmpty, candidates.count <= 200 {
+            narrowed = candidates.filter {
+                hasCandidateWordEvidence(queryWords: queryWords, reference: $0.normalizedText)
+            }
+        }
+
+        return narrowed.isEmpty ? candidates : narrowed
+    }
+
+    private func shouldUseFragmentScore(
+        baseScore: Double,
+        normalizedTranscription: String,
+        queryWords: Set<String>,
+        reference: String
+    ) -> Bool {
+        guard normalizedTranscription.split(separator: " ").count >= 3 else { return false }
+        if baseScore >= 0.34 {
+            return true
+        }
+        guard queryWords.count >= 2 else { return false }
+        return hasCandidateWordEvidence(queryWords: queryWords, reference: reference)
+    }
+
+    private func shouldUseEntryFragmentScore(
+        baseScore: Double,
+        normalizedTranscription: String,
+        queryWords: Set<String>,
+        reference: String
+    ) -> Bool {
+        guard normalizedTranscription.split(separator: " ").count >= 3 else { return false }
+        if baseScore >= 0.45 {
+            return true
+        }
+        return candidateWordEvidenceHitCount(queryWords: queryWords, reference: reference) >= 2
     }
 
     private func candidateEvidenceWords(_ normalizedText: String) -> Set<String> {
@@ -517,24 +611,33 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
     }
 
     private func hasCandidateWordEvidence(queryWords: Set<String>, reference: String) -> Bool {
-        guard !queryWords.isEmpty else { return false }
+        candidateWordEvidenceHitCount(queryWords: queryWords, reference: reference) > 0
+    }
+
+    private func candidateWordEvidenceHitCount(queryWords: Set<String>, reference: String) -> Int {
+        guard !queryWords.isEmpty else { return 0 }
+        var remainingQueryWords = queryWords
 
         for rawReferenceWord in reference.split(separator: " ").map(String.init) where rawReferenceWord.count >= 4 {
             let referenceWord = Self.evidenceStem(rawReferenceWord)
             guard referenceWord.count >= 3 else { continue }
-            if queryWords.contains(referenceWord) {
-                return true
+            if remainingQueryWords.remove(referenceWord) != nil {
+                if remainingQueryWords.isEmpty {
+                    break
+                }
+                continue
             }
 
-            for queryWord in queryWords {
+            for queryWord in Array(remainingQueryWords) {
                 let fullScore = LevenshteinMatcher.ratio(queryWord, referenceWord)
                 if fullScore >= 0.72 {
-                    return true
+                    remainingQueryWords.remove(queryWord)
+                    break
                 }
             }
         }
 
-        return false
+        return queryWords.count - remainingQueryWords.count
     }
 
     private static func evidenceStem(_ word: String) -> String {
@@ -572,8 +675,6 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         if entry.surahNumber == currentSurah {
             switch entry.verseNumber {
             case currentVerse + 1: return 0.22
-            case currentVerse + 2: return 0.12
-            case currentVerse + 3: return 0.06
             default: return 0
             }
         }
@@ -607,7 +708,7 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
     private func fragmentScore(transcription: String, reference: String) -> Double {
         let queryWords = transcription.split(separator: " ")
         let referenceWords = reference.split(separator: " ")
-        guard queryWords.count >= 3, referenceWords.count >= 2 else { return 0 }
+        guard queryWords.count >= 2, referenceWords.count >= 2 else { return 0 }
 
         let full = LevenshteinMatcher.ratio(transcription, reference)
         let partial = LevenshteinMatcher.partialRatio(transcription, reference)

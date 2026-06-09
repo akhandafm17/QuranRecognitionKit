@@ -87,6 +87,10 @@ final class RecitationTracker: @unchecked Sendable {
 
         switch mode {
         case .discovery:
+            guard hasUsefulDiscoveryContent(transcription) else {
+                debugLog("skipping low-information discovery transcription")
+                return nil
+            }
             match = matchingEngine.findBestMatch(
                 transcription: transcription,
                 currentSurah: currentSurah,
@@ -94,7 +98,8 @@ final class RecitationTracker: @unchecked Sendable {
                 surahHint: surahHint,
                 minimumScore: discoveryAcceptanceThreshold,
                 minimumVerseInSurahHint: minimumVerseInSurahHint,
-                exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch
+                exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch,
+                allowGlobalFallbackFromSurahHint: shouldAllowGlobalDiscoveryFallback
             )
         case .tracking:
             if let currentSurah, let currentVerse {
@@ -126,7 +131,7 @@ final class RecitationTracker: @unchecked Sendable {
                 debugLog("no candidate matched")
                 return nil
             }
-            let effectiveMatch = resolveDiscoverySpan(match, transcription: transcription)
+            let effectiveMatch = resolveDiscoveryMatch(match, transcription: transcription)
             debugLog(
                 "candidate \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score)) ayahEnd=\(match.ayahEnd.map(String.init) ?? "nil")"
             )
@@ -159,6 +164,8 @@ final class RecitationTracker: @unchecked Sendable {
             )
             return nil
         }
+
+        let match = recoveryAdjustedMatch(match)
 
         let threshold = discoveryAcceptanceThreshold
         guard match.score >= threshold else {
@@ -245,6 +252,10 @@ final class RecitationTracker: @unchecked Sendable {
         completedSurahBeforeDiscovery != nil
     }
 
+    private var shouldAllowGlobalDiscoveryFallback: Bool {
+        surahHint == nil || completedSurahBeforeDiscovery != nil
+    }
+
     private var minimumVerseInSurahHint: Int? {
         guard surahHint == recoverySurah else { return nil }
         return recoveryMinimumVerse
@@ -267,7 +278,37 @@ final class RecitationTracker: @unchecked Sendable {
             )
         }
 
-        return match.verseNumber >= recoveryMinimumVerse
+        // Recovery audio frequently spans the tail of the previous ayah and the
+        // start of the ayah we lost (e.g. span 1-2 while recovering at verse 2).
+        // Accept the candidate when any part of the span reaches the minimum;
+        // recoveryAdjustedMatch then commits at the minimum verse.
+        return (match.ayahEnd ?? match.verseNumber) >= recoveryMinimumVerse
+    }
+
+    private func recoveryAdjustedMatch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate {
+        guard let recoverySurah,
+              let recoveryMinimumVerse,
+              match.surahNumber == recoverySurah,
+              match.verseNumber < recoveryMinimumVerse,
+              let spanEnd = match.ayahEnd,
+              spanEnd >= recoveryMinimumVerse,
+              let entry = matchingEngine.getVerse(surah: recoverySurah, verse: recoveryMinimumVerse) else {
+            return match
+        }
+
+        debugLog(
+            "clamping recovery span \(match.surahNumber):\(match.verseNumber)-\(spanEnd) to minimum verse \(recoveryMinimumVerse)"
+        )
+        return QuranVerseMatchingEngine.VerseMatchCandidate(
+            surahNumber: entry.surahNumber,
+            verseNumber: entry.verseNumber,
+            ayahEnd: nil,
+            arabicText: entry.arabicText,
+            normalizedText: entry.normalizedText,
+            score: match.score
+        )
     }
 
     private func shouldCommitPostCompletionSwitch(_ match: QuranVerseMatchingEngine.VerseMatchCandidate) -> Bool {
@@ -294,6 +335,13 @@ final class RecitationTracker: @unchecked Sendable {
         guard let completedSurahBeforeDiscovery,
               match.surahNumber != completedSurahBeforeDiscovery else {
             return false
+        }
+
+        if match.ayahEnd != nil, match.verseNumber > 1 {
+            return distinctivePostCompletionHitCount(
+                referenceText: match.normalizedText,
+                transcription: transcription
+            ) < 1
         }
 
         return matchingEngine.hasAmbiguousAlternative(
@@ -379,6 +427,78 @@ final class RecitationTracker: @unchecked Sendable {
             currentSurah: currentSurah,
             currentVerse: currentVerse
         ) {
+            let isImmediateMatch = isImmediateContinuation(
+                effectiveMatch,
+                currentSurah: currentSurah,
+                currentVerse: currentVerse
+            )
+            guard isImmediateMatch || isHighConfidenceSameSurahForwardJump(
+                effectiveMatch,
+                currentSurah: currentSurah,
+                currentVerse: currentVerse,
+                transcription: transcription
+            ) else {
+                // A span anchored at the current or next ayah is still solid
+                // sequential evidence even when the noisy fragment resolves
+                // deeper into the span (resolution can be wrong on short
+                // decodes). Cue exactly one ayah forward instead of counting
+                // a miss — unless the current ayah explains the window just
+                // as well, which means the reciter has not moved yet.
+                let currentVerseScore = matchingEngine.directVerseScore(
+                    transcription: transcription,
+                    surah: currentSurah,
+                    verse: currentVerse
+                )
+                // Span scores carry continuation bonuses, so judge forward
+                // movement on bonus-free direct scores against the next ayah
+                // and the resolved ayah instead of the inflated span score.
+                let forwardVerseScore = max(
+                    matchingEngine.directVerseScore(
+                        transcription: transcription,
+                        surah: currentSurah,
+                        verse: currentVerse + 1
+                    ),
+                    matchingEngine.directVerseScore(
+                        transcription: transcription,
+                        surah: effectiveMatch.surahNumber,
+                        verse: effectiveMatch.verseNumber
+                    )
+                )
+                if match.verseNumber <= currentVerse + 1,
+                   effectiveMatch.score >= probableSpanContinuationThreshold,
+                   hasUsefulContinuationContent(transcription),
+                   currentVerseScore + 0.05 < forwardVerseScore,
+                   !isStalePreviousAyahAudio(
+                       transcription: transcription,
+                       currentSurah: currentSurah,
+                       currentVerse: currentVerse,
+                       forwardScore: forwardVerseScore
+                   ),
+                   !hasStrongerCrossSurahAlternative(transcription: transcription, localMatch: effectiveMatch) {
+                    resetLowConfidenceContinuation()
+                    return advanceOneAyahToward(
+                        effectiveMatch,
+                        currentSurah: currentSurah,
+                        currentVerse: currentVerse,
+                        reason: "forward span anchored at next ayah"
+                    )
+                }
+                debugLog(
+                    "resolved span continuation rejected multi-ayah target \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) score=\(String(format: "%.3f", effectiveMatch.score))"
+                )
+                return handleTrackingMiss(transcription: transcription)
+            }
+
+            if !isImmediateMatch {
+                resetLowConfidenceContinuation()
+                return advanceOneAyahToward(
+                    effectiveMatch,
+                    currentSurah: currentSurah,
+                    currentVerse: currentVerse,
+                    reason: "resolved span forward evidence"
+                )
+            }
+
             let hasWordEvidence = hasContinuationWordEvidence(match: effectiveMatch, transcription: transcription)
             let hasStrongSingleEvidence = hasStrongSingleContinuationEvidence(
                 referenceText: effectiveMatch.normalizedText,
@@ -444,8 +564,12 @@ final class RecitationTracker: @unchecked Sendable {
             transcription: transcription
         ) {
             resetLowConfidenceContinuation()
-            debugLog("high-confidence same-surah jump to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber)")
-            return advance(to: effectiveMatch)
+            return advanceOneAyahToward(
+                effectiveMatch,
+                currentSurah: currentSurah,
+                currentVerse: currentVerse,
+                reason: "high-confidence same-surah forward evidence"
+            )
         }
 
         guard effectiveMatch.score >= jumpThreshold else {
@@ -464,7 +588,50 @@ final class RecitationTracker: @unchecked Sendable {
 
         debugLog("jump pending \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
         guard consecutiveCount >= requiredConsecutiveJump else { return nil }
+        if shouldAdvanceSequentiallyToward(effectiveMatch, currentSurah: currentSurah, currentVerse: currentVerse) {
+            return advanceOneAyahToward(
+                effectiveMatch,
+                currentSurah: currentSurah,
+                currentVerse: currentVerse,
+                reason: "confirmed same-surah forward candidate"
+            )
+        }
         return advance(to: effectiveMatch)
+    }
+
+    private func resolveDiscoveryMatch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate {
+        if let openingMatch = resolveFatihahOpeningMatch(match, transcription: transcription) {
+            return openingMatch
+        }
+
+        return resolveDiscoverySpan(match, transcription: transcription)
+    }
+
+    private func resolveFatihahOpeningMatch(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate? {
+        guard surahHint == 1,
+              match.surahNumber == 1,
+              match.verseNumber != 1,
+              match.ayahEnd == nil,
+              isLooseBismillahOpening(transcription),
+              let opening = matchingEngine.getVerse(surah: 1, verse: 1) else {
+            return nil
+        }
+
+        debugLog("resolved noisy Fatihah bismillah opening \(match.surahNumber):\(match.verseNumber) to 1:1")
+        return QuranVerseMatchingEngine.VerseMatchCandidate(
+            surahNumber: 1,
+            verseNumber: 1,
+            ayahEnd: nil,
+            arabicText: opening.arabicText,
+            normalizedText: opening.normalizedText,
+            score: max(match.score, hintedImmediateDiscoveryThreshold)
+        )
     }
 
     private func resolveDiscoverySpan(
@@ -630,6 +797,11 @@ final class RecitationTracker: @unchecked Sendable {
             return true
         }
 
+        if scopedMatch.verseNumber < currentVerse,
+           !isAtEndOfSurah(surah: currentSurah, verse: currentVerse) {
+            return false
+        }
+
         if scopedMatch.verseNumber == currentVerse {
             return false
         }
@@ -695,6 +867,29 @@ final class RecitationTracker: @unchecked Sendable {
             hasStrongSingleContinuationEvidence(referenceText: match.normalizedText, transcription: transcription)
     }
 
+    private func shouldAdvanceSequentiallyToward(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        currentSurah: Int,
+        currentVerse: Int
+    ) -> Bool {
+        match.surahNumber == currentSurah && match.verseNumber > currentVerse + 1
+    }
+
+    private func advanceOneAyahToward(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        currentSurah: Int,
+        currentVerse: Int,
+        reason: String
+    ) -> RecognizedVerse {
+        guard shouldAdvanceSequentiallyToward(match, currentSurah: currentSurah, currentVerse: currentVerse),
+              let nextEntry = matchingEngine.getVerse(surah: currentSurah, verse: currentVerse + 1) else {
+            return advance(to: match)
+        }
+
+        debugLog("\(reason) target \(match.surahNumber):\(match.verseNumber), cueing next ayah \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
+        return advance(to: nextEntry, confidence: match.score)
+    }
+
     private func shouldAcceptNoisySequentialContinuationIfNeeded(
         primaryAccepted: Bool,
         match: QuranVerseMatchingEngine.VerseMatchCandidate,
@@ -718,6 +913,42 @@ final class RecitationTracker: @unchecked Sendable {
               hasUsefulContinuationContent(transcription) else {
             return false
         }
+
+        // The reciter often pauses or repeats while *starting* the current
+        // ayah, and its opening words can fuzzily match a forward candidate.
+        // match.score can also carry a +0.22 continuation bonus, so compare
+        // bonus-free direct scores: only advance when the target ayah
+        // explains the window clearly better than the current ayah.
+        if let currentSurah, let currentVerse {
+            let currentVerseScore = matchingEngine.directVerseScore(
+                transcription: transcription,
+                surah: currentSurah,
+                verse: currentVerse
+            )
+            let targetVerseScore = matchingEngine.directVerseScore(
+                transcription: transcription,
+                surah: match.surahNumber,
+                verse: match.verseNumber
+            )
+            if currentVerseScore + 0.05 >= targetVerseScore {
+                debugLog(
+                    "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because current ayah explains window (current=\(String(format: "%.3f", currentVerseScore)) target=\(String(format: "%.3f", targetVerseScore)))"
+                )
+                return false
+            }
+            if isStalePreviousAyahAudio(
+                transcription: transcription,
+                currentSurah: currentSurah,
+                currentVerse: currentVerse,
+                forwardScore: targetVerseScore
+            ) {
+                debugLog(
+                    "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because window matches previous ayah better"
+                )
+                return false
+            }
+        }
+
         guard !hasStrongerCrossSurahAlternative(transcription: transcription, localMatch: match) else {
             debugLog(
                 "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because a cross-surah alternative is stronger"
@@ -729,6 +960,26 @@ final class RecitationTracker: @unchecked Sendable {
             "accepting probable noisy continuation \(match.surahNumber):\(match.verseNumber) score=\(String(format: "%.3f", match.score))"
         )
         return true
+    }
+
+    /// Tail audio from the ayah behind the current one can fuzzily match a
+    /// forward candidate while the reciter has not actually moved (e.g. a
+    /// garbled window of 87:7's tail matching 87:9 while tracking 87:8).
+    /// When the previous ayah explains the window clearly better than the
+    /// proposed forward target, the audio is stale and must not advance.
+    private func isStalePreviousAyahAudio(
+        transcription: String,
+        currentSurah: Int,
+        currentVerse: Int,
+        forwardScore: Double
+    ) -> Bool {
+        guard currentVerse > 1 else { return false }
+        let previousVerseScore = matchingEngine.directVerseScore(
+            transcription: transcription,
+            surah: currentSurah,
+            verse: currentVerse - 1
+        )
+        return previousVerseScore > forwardScore + 0.05
     }
 
     private func hasStrongerCrossSurahAlternative(
@@ -781,6 +1032,39 @@ final class RecitationTracker: @unchecked Sendable {
         let referenceStems = ArabicNormalizer.words(referenceText)
             .map(evidenceStem)
             .filter { $0.count >= 3 }
+
+        var hits = 0
+        for queryStem in queryStems {
+            if referenceStems.contains(queryStem) {
+                hits += 1
+                continue
+            }
+
+            if referenceStems.contains(where: { LevenshteinMatcher.ratio(queryStem, $0) >= 0.78 }) {
+                hits += 1
+            }
+        }
+        return hits
+    }
+
+    private func distinctivePostCompletionHitCount(
+        referenceText: String,
+        transcription: String
+    ) -> Int {
+        let genericStems: Set<String> = [
+            "الله", "لله", "سماوات", "سماء", "ارض", "رب", "رحمن", "رحيم",
+            "هذا", "هذه", "ذلك", "تلك", "الذي", "الذين", "التي", "وما",
+            "وهو", "وهي", "ومن", "وفي", "وال", "على", "علي", "الى", "الي",
+            "في", "من", "ما", "لا", "لم", "لن", "ان", "كان", "لقد"
+        ]
+        let queryStems = Set(
+            ArabicNormalizer.words(transcription)
+                .map(evidenceStem)
+                .filter { $0.count >= 3 && !genericStems.contains($0) }
+        )
+        let referenceStems = ArabicNormalizer.words(referenceText)
+            .map(evidenceStem)
+            .filter { $0.count >= 3 && !genericStems.contains($0) }
 
         var hits = 0
         for queryStem in queryStems {
@@ -982,7 +1266,8 @@ final class RecitationTracker: @unchecked Sendable {
             surahHint: surahHint,
             minimumScore: discoveryAcceptanceThreshold,
             minimumVerseInSurahHint: minimumVerseInSurahHint,
-            exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch
+            exhaustiveSpanSearch: shouldUseExhaustiveSpanSearch,
+            allowGlobalFallbackFromSurahHint: shouldAllowGlobalDiscoveryFallback
         ) else {
             debugLog("rediscovery found no global candidate")
             return nil
@@ -1018,6 +1303,10 @@ final class RecitationTracker: @unchecked Sendable {
     }
 
     private func shouldCountTrackingMiss(_ transcription: String) -> Bool {
+        hasUsefulDiscoveryContent(transcription)
+    }
+
+    private func hasUsefulDiscoveryContent(_ transcription: String) -> Bool {
         let words = ArabicNormalizer.words(transcription)
         let characterCount = words.reduce(0) { $0 + $1.count }
 
@@ -1060,6 +1349,29 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
+        // Adjacent ayahs can share stems (e.g. أصبحت in one ayah and مصبحين
+        // ending the next). When the window still matches the previous ayah
+        // clearly better than the current one, the ending-stem hit is stale
+        // audio from the previous ayah, not a completed current ayah.
+        if currentVerse > 1 {
+            let currentVerseScore = matchingEngine.directVerseScore(
+                transcription: transcription,
+                surah: currentSurah,
+                verse: currentVerse
+            )
+            let previousVerseScore = matchingEngine.directVerseScore(
+                transcription: transcription,
+                surah: currentSurah,
+                verse: currentVerse - 1
+            )
+            if previousVerseScore > currentVerseScore + 0.1 {
+                debugLog(
+                    "ignoring ending stem for \(entry.surahNumber):\(entry.verseNumber); window matches previous ayah better (prev=\(String(format: "%.3f", previousVerseScore)) current=\(String(format: "%.3f", currentVerseScore)))"
+                )
+                return nil
+            }
+        }
+
         debugLog("detected ending word for \(entry.surahNumber):\(entry.verseNumber), showing next phrase \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
         return advance(to: nextEntry, confidence: confidence)
     }
@@ -1084,8 +1396,6 @@ final class RecitationTracker: @unchecked Sendable {
         }
 
         let finalScore = bestStemScore(for: finalStem, in: queryStems)
-        guard finalScore >= 0.72 else { return nil }
-
         let previousFinalScore: Double
         if referenceStems.count >= 2 {
             previousFinalScore = bestStemScore(
@@ -1096,7 +1406,34 @@ final class RecitationTracker: @unchecked Sendable {
             previousFinalScore = 0
         }
 
-        return min(0.95, max(0.70, (0.75 * finalScore) + (0.20 * previousFinalScore)))
+        if finalScore >= 0.72 {
+            return min(0.95, max(0.70, (0.75 * finalScore) + (0.20 * previousFinalScore)))
+        }
+
+        return nearEndingTailConfidence(queryStems: queryStems, referenceStems: referenceStems)
+    }
+
+    private func nearEndingTailConfidence(queryStems: [String], referenceStems: [String]) -> Double? {
+        guard referenceStems.count >= 5 else { return nil }
+
+        let penultimateStem = referenceStems[referenceStems.count - 2]
+        let penultimateScore = bestStemScore(for: penultimateStem, in: queryStems)
+        guard penultimateScore >= 0.82 else { return nil }
+
+        let tailStems = referenceStems.suffix(4)
+        var tailHits = 0
+        var tailScoreTotal = 0.0
+        for stem in tailStems {
+            let score = bestStemScore(for: stem, in: queryStems)
+            if score >= 0.76 {
+                tailHits += 1
+                tailScoreTotal += score
+            }
+        }
+
+        guard tailHits >= 2 else { return nil }
+        let averageTailScore = tailScoreTotal / Double(tailHits)
+        return min(0.90, max(0.72, (0.65 * penultimateScore) + (0.20 * averageTailScore)))
     }
 
     private func isBismillahPhrase(_ transcription: String) -> Bool {
@@ -1105,6 +1442,20 @@ final class RecitationTracker: @unchecked Sendable {
         return (words.contains("بسم") || words.contains("اسم")) &&
             words.contains("الله") &&
             stems.contains("رحيم")
+    }
+
+    private func isLooseBismillahOpening(_ transcription: String) -> Bool {
+        let words = ArabicNormalizer.words(transcription)
+        let stems = words.map(evidenceStem)
+        let hasOpeningCue = words.contains("بسم") ||
+            words.contains("بس") ||
+            words.contains("اسم")
+        guard hasOpeningCue else { return false }
+
+        let hasRahman = stems.contains { LevenshteinMatcher.ratio($0, "رحمن") >= 0.78 }
+        let hasRahim = stems.contains { LevenshteinMatcher.ratio($0, "رحيم") >= 0.78 }
+        let hasAllah = words.contains("الله")
+        return hasRahim && (hasRahman || hasAllah)
     }
 
     private func bestStemScore(for referenceStem: String, in queryStems: [String]) -> Double {

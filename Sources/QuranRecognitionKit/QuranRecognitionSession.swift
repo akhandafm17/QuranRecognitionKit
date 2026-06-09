@@ -226,11 +226,11 @@ public final class QuranRecognitionSession: @unchecked Sendable {
         let freshAudioSeconds: Double
         switch mode {
         case .discovery:
-            freshAudioSeconds = 0.75
+            freshAudioSeconds = configuration.discoveryFreshAudioSeconds
         case .tracking:
-            freshAudioSeconds = 0.75
+            freshAudioSeconds = configuration.trackingFreshAudioSeconds
         }
-        return Int(freshAudioSeconds * 16_000)
+        return max(1, Int(freshAudioSeconds * 16_000))
     }
 }
 

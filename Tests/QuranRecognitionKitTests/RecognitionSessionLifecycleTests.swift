@@ -2,6 +2,20 @@ import Foundation
 import Testing
 @testable import QuranRecognitionKit
 
+@Test func configurationDefaultsUseMobileStreamingCadence() {
+    let configuration = QuranRecognizer.Configuration()
+
+    #expect(configuration.processingInterval == 0.20)
+    #expect(configuration.discoveryWindowSeconds == 3.5)
+    #expect(configuration.trackingWindowSeconds == 2.25)
+    #expect(configuration.minimumDiscoveryWindowSeconds == 1.75)
+    #expect(configuration.minimumTrackingWindowSeconds == 0.90)
+    #expect(configuration.discoveryFreshAudioSeconds == 0.30)
+    #expect(configuration.trackingFreshAudioSeconds == 0.20)
+    #expect(configuration.maximumBufferedSeconds == 6.0)
+    #expect(configuration.intraOpThreadCount == 1)
+}
+
 @Test func recognitionSessionStartStopLifecycleEmitsStates() async throws {
     let verses = [
         QuranVerseMatchingEngine.VerseEntry(
