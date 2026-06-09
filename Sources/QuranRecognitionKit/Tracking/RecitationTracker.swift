@@ -39,6 +39,11 @@ final class RecitationTracker: @unchecked Sendable {
     private let requiredConsecutiveJump = 2
     private let hintedDiscoveryThreshold = 0.58
     private let hintedImmediateDiscoveryThreshold = 0.60
+    /// During recovery the reciter realistically advances only a few ayahs
+    /// past the loss point; commits further ahead need distinctive evidence.
+    private let maximumImmediateRecoveryAdvance = 6
+    private let farRecoveryScoreThreshold = 0.75
+    private let farRecoveryAmbiguityTolerance = 0.08
     private let postCompletionDiscoveryThreshold = 0.60
     private let postCompletionOpeningImmediateThreshold = 0.80
     private let immediateDiscoveryThreshold = 0.85
@@ -167,6 +172,25 @@ final class RecitationTracker: @unchecked Sendable {
 
         let match = recoveryAdjustedMatch(match)
 
+        // A recovery commit far ahead of the loss point is almost always a
+        // generic phrase artifact: long surahs repeat phrases ("اولئك هم
+        // المفلحون", "ان الله سميع عليم", ...) that score highly against
+        // verses hundreds of ayahs away. The reciter is near the loss point,
+        // so a far commit needs distinctive, unambiguous evidence.
+        if let recoverySurah,
+           let recoveryMinimumVerse,
+           match.surahNumber == recoverySurah,
+           match.verseNumber > recoveryMinimumVerse + maximumImmediateRecoveryAdvance,
+           !isDistinctiveFarRecoveryCandidate(match, transcription: transcription) {
+            pendingSurah = nil
+            pendingVerse = nil
+            consecutiveCount = 0
+            debugLog(
+                "rejecting far recovery candidate \(match.surahNumber):\(match.verseNumber) — generic or ambiguous evidence while recovering near \(recoverySurah):\(recoveryMinimumVerse)"
+            )
+            return nil
+        }
+
         let threshold = discoveryAcceptanceThreshold
         guard match.score >= threshold else {
             pendingSurah = nil
@@ -283,6 +307,35 @@ final class RecitationTracker: @unchecked Sendable {
         // Accept the candidate when any part of the span reaches the minimum;
         // recoveryAdjustedMatch then commits at the minimum verse.
         return (match.ayahEnd ?? match.verseNumber) >= recoveryMinimumVerse
+    }
+
+    /// A far recovery candidate is only trustworthy when the window carries
+    /// enough words to be specific, scores strongly, and no other verse in
+    /// the mushaf explains the window nearly as well. Generic repeated
+    /// phrases fail the ambiguity check because they match many verses.
+    private func isDistinctiveFarRecoveryCandidate(
+        _ match: QuranVerseMatchingEngine.VerseMatchCandidate,
+        transcription: String
+    ) -> Bool {
+        guard ArabicNormalizer.words(transcription).count >= 4,
+              match.score >= farRecoveryScoreThreshold else {
+            return false
+        }
+        // hasAmbiguousAlternative skips span candidates, so check the span's
+        // anchor verse instead of letting far spans through unexamined.
+        let anchor = QuranVerseMatchingEngine.VerseMatchCandidate(
+            surahNumber: match.surahNumber,
+            verseNumber: match.verseNumber,
+            ayahEnd: nil,
+            arabicText: match.arabicText,
+            normalizedText: match.normalizedText,
+            score: match.score
+        )
+        return !matchingEngine.hasAmbiguousAlternative(
+            transcription: transcription,
+            candidate: anchor,
+            scoreTolerance: farRecoveryAmbiguityTolerance
+        )
     }
 
     private func recoveryAdjustedMatch(

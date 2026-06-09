@@ -772,6 +772,41 @@ private func driveTracker(
     #expect(tracker.currentVerse == 10)
 }
 
+@Test func recoveryAfterLossInLongSurahDoesNotCommitFarAheadOnGenericPhrases() throws {
+    let engine = try QuranVerseMatchingEngine.loadBundled()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 2)
+    try driveTracker(tracker, engine: engine, surah: 2, through: 4)
+
+    // Force a tracking loss at 2:4.
+    for _ in 0..<4 {
+        _ = tracker.processTranscription("نهايةدرس مجهولة كلمات")
+    }
+    #expect(tracker.mode == .discovery)
+
+    // Al-Baqarah replay: after a loss near 2:4, generic windows (from the
+    // 2:5 region audio) fuzzily matched verses deep in the surah and the
+    // hinted recovery committed there (observed 2:4 -> 2:244 in the replay
+    // fixture). Short, weak, or ambiguous evidence must never recover far
+    // ahead of the loss point.
+    for generic in ["من ربهم وهداه", "ال العالمين", "اولئك هم المفلحون", "ان الله سميع عليم"] {
+        _ = tracker.processTranscription(generic)
+        if tracker.mode == .tracking {
+            #expect(tracker.currentSurah == 2)
+            let verse = try #require(tracker.currentVerse)
+            #expect(verse <= 10, "far recovery commit at 2:\(verse) from generic '\(generic)'")
+        }
+    }
+
+    // Distinct evidence of the verse right after the loss point still
+    // recovers promptly.
+    let fifth = try #require(engine.getVerse(surah: 2, verse: 5))
+    _ = tracker.processTranscription(fifth.normalizedText)
+    #expect(tracker.mode == .tracking)
+    #expect(tracker.currentSurah == 2)
+    let recovered = try #require(tracker.currentVerse)
+    #expect((4...6).contains(recovered), "recovered at 2:\(recovered) instead of near 2:4")
+}
+
 @Test func noisyNextAyahEvidenceStillAdvancesPromptlyFromLog() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine, surahHint: 87)

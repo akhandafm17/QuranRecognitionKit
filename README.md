@@ -367,7 +367,7 @@ The SDK avoids main-thread inference and audio processing:
 
 Current validation:
 
-- `swift test` passes on macOS arm64 with 86 tests.
+- `swift test` passes on macOS arm64 with 87 tests.
 - The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
 - A real-recitation replay test (`RealRecitationReplayTests`) feeds 12 minutes of an actual Surah Al-Baqarah recitation (2:1-2:59) through the real tracker, using per-window decodes produced by the bundled ONNX model with the session's exact streaming window policy, and asserts sequential no-skip/no-regression following with bounded tracking losses.
 - Scenario tests (`RecitationScenarioTests`) simulate full recitation sessions across structurally different surahs (Al-Fatihah, Al-Kahf, Al-Mulk, Al-Ikhlas, An-Nas) and recitation styles (clean per-ayah windows, rolling boundary-spanning windows, short fragments, noisy clipped decodes), asserting sequential no-skip/no-regression tracking and per-window latency bounds.
