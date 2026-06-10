@@ -32,6 +32,7 @@ final class RecitationTracker: @unchecked Sendable {
     private var missedTrackingCount = 0
     private var lowInformationTrackingCount = 0
     private var completedSurahBeforeDiscovery: Int?
+    private var completedSurahReachedVerse: Int?
     private var recoverySurah: Int?
     private var recoveryMinimumVerse: Int?
     /// Caches the last far recovery candidate rejected by the (expensive)
@@ -39,6 +40,15 @@ final class RecitationTracker: @unchecked Sendable {
     /// whole-mushaf ambiguity scan on every overlapping window.
     private var lastRejectedFarRecovery: (surah: Int, verse: Int, score: Double)?
     private var crossSurahAlternativeCache: (key: String, result: Bool)?
+    /// Consecutive advances made purely on weak evidence (noisy continuation
+    /// or forward-span fallback). Garbage windows against long ayahs can
+    /// chain weak advances and race the reader several verses ahead
+    /// (developer Al-Kahf recording: 16 -> 21 in 12 seconds). After this
+    /// many weak advances in a row, a strong signal (word evidence,
+    /// coverage, ending word, or a same-verse match) is required before the
+    /// next weak advance.
+    private var consecutiveWeakAdvances = 0
+    private let maximumConsecutiveWeakAdvances = 3
 
     private let requiredConsecutiveDiscovery = 2
     private let requiredConsecutiveJump = 2
@@ -109,6 +119,7 @@ final class RecitationTracker: @unchecked Sendable {
         missedTrackingCount = 0
         lowInformationTrackingCount = 0
         completedSurahBeforeDiscovery = nil
+        completedSurahReachedVerse = nil
         recoverySurah = nil
         lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
@@ -256,6 +267,20 @@ final class RecitationTracker: @unchecked Sendable {
 
         debugLog("discovery pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveDiscovery)")
 
+        // If rediscovery lands back in the surah we assumed completed, it
+        // must not re-commit behind the verse the reader already reached
+        // (developer chain recording: after finishing 114:6, trailing audio
+        // re-committed 114:5 and the reader stepped backwards).
+        if let completedSurahBeforeDiscovery,
+           let completedSurahReachedVerse,
+           match.surahNumber == completedSurahBeforeDiscovery,
+           match.verseNumber < completedSurahReachedVerse {
+            debugLog(
+                "rejecting post-completion re-commit \(match.surahNumber):\(match.verseNumber) behind reached verse \(completedSurahReachedVerse)"
+            )
+            return nil
+        }
+
         // A cross-surah commit after completing a surah is a big decision;
         // a one- or two-word garble is never enough evidence for it
         // (developer recording: 'قال إنعب' — garbled mid-Al-A'la audio —
@@ -310,8 +335,10 @@ final class RecitationTracker: @unchecked Sendable {
         resetLowConfidenceContinuation()
         missedTrackingCount = 0
         lowInformationTrackingCount = 0
+        consecutiveWeakAdvances = 0
         surahHint = nil
         completedSurahBeforeDiscovery = nil
+        completedSurahReachedVerse = nil
         recoverySurah = nil
         lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
@@ -540,6 +567,7 @@ final class RecitationTracker: @unchecked Sendable {
         }
 
         if let advancedVerse = advanceAfterCurrentVerseEnding(transcription: transcription) {
+            consecutiveWeakAdvances = 0
             return advancedVerse
         }
 
@@ -550,6 +578,7 @@ final class RecitationTracker: @unchecked Sendable {
            let nextEntry = matchingEngine.getVerse(surah: currentSurah, verse: currentVerse + 1) {
             if hasVerseWordEvidence(entry: nextEntry, transcription: transcription) {
                 debugLog("span continuation \(match.verseNumber)-\(spanEnd), advancing to \(nextEntry.surahNumber):\(nextEntry.verseNumber)")
+                consecutiveWeakAdvances = 0
                 return advance(to: nextEntry, confidence: match.score)
             }
             debugLog("span continuation \(match.verseNumber)-\(spanEnd) rejected without next-ayah word evidence")
@@ -558,6 +587,7 @@ final class RecitationTracker: @unchecked Sendable {
         let effectiveMatch = resolveTrackingSpan(match, transcription: transcription)
 
         if effectiveMatch.surahNumber == currentSurah && effectiveMatch.verseNumber == currentVerse {
+            consecutiveWeakAdvances = 0
             let autoAdvancedVerse = updateWordCoverage(transcription: transcription, surah: currentSurah, verse: currentVerse)
             pendingSurah = nil
             pendingVerse = nil
@@ -644,6 +674,7 @@ final class RecitationTracker: @unchecked Sendable {
                 if match.verseNumber <= currentVerse + 1,
                    effectiveMatch.score >= probableSpanContinuationThreshold,
                    hasUsefulContinuationContent(transcription),
+                   consecutiveWeakAdvances < maximumConsecutiveWeakAdvances,
                    clearsWeakAdvanceFloor(forwardScore: forwardVerseScore, currentScore: currentVerseScore),
                    hasMargin || hasDistinctWord,
                    !isStalePreviousAyahAudio(
@@ -655,6 +686,7 @@ final class RecitationTracker: @unchecked Sendable {
                    ),
                    !hasStrongerCrossSurahAlternative(transcription: transcription, localMatch: effectiveMatch) {
                     resetLowConfidenceContinuation()
+                    consecutiveWeakAdvances += 1
                     return advanceOneAyahToward(
                         effectiveMatch,
                         currentSurah: currentSurah,
@@ -670,6 +702,7 @@ final class RecitationTracker: @unchecked Sendable {
 
             if !isImmediateMatch {
                 resetLowConfidenceContinuation()
+                consecutiveWeakAdvances = 0
                 return advanceOneAyahToward(
                     effectiveMatch,
                     currentSurah: currentSurah,
@@ -685,12 +718,12 @@ final class RecitationTracker: @unchecked Sendable {
             )
             let primaryAccepted = effectiveMatch.score >= immediateContinuationThreshold &&
                 (hasWordEvidence || hasStrongSingleEvidence)
-            let accepted = primaryAccepted || shouldAcceptNoisySequentialContinuationIfNeeded(
+            let accepted = primaryAccepted || (consecutiveWeakAdvances < maximumConsecutiveWeakAdvances && shouldAcceptNoisySequentialContinuationIfNeeded(
                 primaryAccepted: primaryAccepted,
                 match: effectiveMatch,
                 transcription: transcription,
                 threshold: probableSpanContinuationThreshold
-            )
+            ))
             guard accepted else {
                 debugLog(
                     "resolved span continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
@@ -699,6 +732,11 @@ final class RecitationTracker: @unchecked Sendable {
             }
 
             resetLowConfidenceContinuation()
+            if primaryAccepted {
+                consecutiveWeakAdvances = 0
+            } else {
+                consecutiveWeakAdvances += 1
+            }
             debugLog("resolved span continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) wordEvidence=\(hasWordEvidence)")
             return advance(to: effectiveMatch)
         }
@@ -711,12 +749,12 @@ final class RecitationTracker: @unchecked Sendable {
             )
             let primaryAccepted = effectiveMatch.score >= immediateContinuationThreshold &&
                 (hasWordEvidence || hasStrongSingleEvidence)
-            let accepted = primaryAccepted || shouldAcceptNoisySequentialContinuationIfNeeded(
+            let accepted = primaryAccepted || (consecutiveWeakAdvances < maximumConsecutiveWeakAdvances && shouldAcceptNoisySequentialContinuationIfNeeded(
                 primaryAccepted: primaryAccepted,
                 match: effectiveMatch,
                 transcription: transcription,
                 threshold: probableImmediateContinuationThreshold
-            )
+            ))
             guard accepted else {
                 debugLog(
                     "immediate continuation rejected score=\(String(format: "%.3f", effectiveMatch.score)) threshold=\(immediateContinuationThreshold)"
@@ -732,6 +770,11 @@ final class RecitationTracker: @unchecked Sendable {
             }
 
             resetLowConfidenceContinuation()
+            if primaryAccepted {
+                consecutiveWeakAdvances = 0
+            } else {
+                consecutiveWeakAdvances += 1
+            }
             debugLog("immediate continuation to \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) wordEvidence=\(hasWordEvidence)")
             return advance(to: effectiveMatch)
         }
@@ -743,6 +786,7 @@ final class RecitationTracker: @unchecked Sendable {
             transcription: transcription
         ) {
             resetLowConfidenceContinuation()
+            consecutiveWeakAdvances = 0
             return advanceOneAyahToward(
                 effectiveMatch,
                 currentSurah: currentSurah,
@@ -767,6 +811,7 @@ final class RecitationTracker: @unchecked Sendable {
 
         debugLog("jump pending \(effectiveMatch.surahNumber):\(effectiveMatch.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveJump)")
         guard consecutiveCount >= requiredConsecutiveJump else { return nil }
+        consecutiveWeakAdvances = 0
         if shouldAdvanceSequentiallyToward(effectiveMatch, currentSurah: currentSurah, currentVerse: currentVerse) {
             return advanceOneAyahToward(
                 effectiveMatch,
@@ -1005,6 +1050,7 @@ final class RecitationTracker: @unchecked Sendable {
         missedTrackingCount = 0
         lowInformationTrackingCount = 0
         completedSurahBeforeDiscovery = nil
+        completedSurahReachedVerse = nil
         recoverySurah = nil
         lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
@@ -1502,12 +1548,14 @@ final class RecitationTracker: @unchecked Sendable {
         lowInformationTrackingCount = 0
         if assumeCompletedSurah {
             completedSurahBeforeDiscovery = lostSurah
+            completedSurahReachedVerse = lostVerse
             surahHint = nil
             recoverySurah = nil
             lastRejectedFarRecovery = nil
             recoveryMinimumVerse = nil
         } else {
             completedSurahBeforeDiscovery = nil
+            completedSurahReachedVerse = nil
             surahHint = lostSurah
             recoverySurah = lostSurah
             lastRejectedFarRecovery = nil
