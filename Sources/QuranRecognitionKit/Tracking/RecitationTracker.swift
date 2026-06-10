@@ -34,6 +34,10 @@ final class RecitationTracker: @unchecked Sendable {
     private var completedSurahBeforeDiscovery: Int?
     private var recoverySurah: Int?
     private var recoveryMinimumVerse: Int?
+    /// Caches the last far recovery candidate rejected by the (expensive)
+    /// distinctiveness check, so persisting audio does not re-pay the
+    /// whole-mushaf ambiguity scan on every overlapping window.
+    private var lastRejectedFarRecovery: (surah: Int, verse: Int, score: Double)?
 
     private let requiredConsecutiveDiscovery = 2
     private let requiredConsecutiveJump = 2
@@ -88,6 +92,7 @@ final class RecitationTracker: @unchecked Sendable {
         lowInformationTrackingCount = 0
         completedSurahBeforeDiscovery = nil
         recoverySurah = nil
+        lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
         surahHint = nil
     }
@@ -102,7 +107,7 @@ final class RecitationTracker: @unchecked Sendable {
                 debugLog("skipping low-information discovery transcription")
                 return nil
             }
-            match = matchingEngine.findBestMatch(
+            match = nearRecoveryMatch(transcription: transcription) ?? matchingEngine.findBestMatch(
                 transcription: transcription,
                 currentSurah: currentSurah,
                 currentVerse: currentVerse,
@@ -186,15 +191,29 @@ final class RecitationTracker: @unchecked Sendable {
         if let recoverySurah,
            let recoveryMinimumVerse,
            match.surahNumber == recoverySurah,
-           match.verseNumber > recoveryMinimumVerse + maximumImmediateRecoveryAdvance,
-           !isDistinctiveFarRecoveryCandidate(match, transcription: transcription) {
-            pendingSurah = nil
-            pendingVerse = nil
-            consecutiveCount = 0
-            debugLog(
-                "rejecting far recovery candidate \(match.surahNumber):\(match.verseNumber) — generic or ambiguous evidence while recovering near \(recoverySurah):\(recoveryMinimumVerse)"
-            )
-            return nil
+           match.verseNumber > recoveryMinimumVerse + maximumImmediateRecoveryAdvance {
+            if let rejected = lastRejectedFarRecovery,
+               rejected.surah == match.surahNumber,
+               rejected.verse == match.verseNumber,
+               match.score <= rejected.score + 0.02 {
+                pendingSurah = nil
+                pendingVerse = nil
+                consecutiveCount = 0
+                debugLog(
+                    "rejecting previously rejected far recovery candidate \(match.surahNumber):\(match.verseNumber)"
+                )
+                return nil
+            }
+            guard isDistinctiveFarRecoveryCandidate(match, transcription: transcription) else {
+                lastRejectedFarRecovery = (match.surahNumber, match.verseNumber, match.score)
+                pendingSurah = nil
+                pendingVerse = nil
+                consecutiveCount = 0
+                debugLog(
+                    "rejecting far recovery candidate \(match.surahNumber):\(match.verseNumber) — generic or ambiguous evidence while recovering near \(recoverySurah):\(recoveryMinimumVerse)"
+                )
+                return nil
+            }
         }
 
         let threshold = discoveryAcceptanceThreshold
@@ -256,6 +275,7 @@ final class RecitationTracker: @unchecked Sendable {
         surahHint = nil
         completedSurahBeforeDiscovery = nil
         recoverySurah = nil
+        lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
         wordsCovered = 0
         totalWordsInVerse = matchingEngine
@@ -289,6 +309,28 @@ final class RecitationTracker: @unchecked Sendable {
     private var minimumVerseInSurahHint: Int? {
         guard surahHint == recoverySurah else { return nil }
         return recoveryMinimumVerse
+    }
+
+    /// During recovery, the reciter is almost certainly within a few ayahs
+    /// of the loss point. Search that window first: it is both the right
+    /// locality prior and far cheaper than scanning the whole surah (and the
+    /// far-candidate ambiguity scan) on every discovery window.
+    private func nearRecoveryMatch(
+        transcription: String
+    ) -> QuranVerseMatchingEngine.VerseMatchCandidate? {
+        guard let recoverySurah,
+              let recoveryMinimumVerse,
+              surahHint == recoverySurah else {
+            return nil
+        }
+        return matchingEngine.findBestMatchInSurah(
+            transcription: transcription,
+            surahNumber: recoverySurah,
+            minimumScore: discoveryAcceptanceThreshold,
+            minimumVerse: recoveryMinimumVerse,
+            maximumVerse: recoveryMinimumVerse + maximumImmediateRecoveryAdvance,
+            exhaustiveSpanSearch: false
+        )
     }
 
     private func shouldAcceptRecoveryMatch(
@@ -903,6 +945,7 @@ final class RecitationTracker: @unchecked Sendable {
         lowInformationTrackingCount = 0
         completedSurahBeforeDiscovery = nil
         recoverySurah = nil
+        lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
         surahHint = nil
         totalWordsInVerse = matchingEngine
@@ -1383,15 +1426,17 @@ final class RecitationTracker: @unchecked Sendable {
             completedSurahBeforeDiscovery = lostSurah
             surahHint = nil
             recoverySurah = nil
+            lastRejectedFarRecovery = nil
             recoveryMinimumVerse = nil
         } else {
             completedSurahBeforeDiscovery = nil
             surahHint = lostSurah
             recoverySurah = lostSurah
+            lastRejectedFarRecovery = nil
             recoveryMinimumVerse = lostVerse
         }
 
-        guard let rediscovery = matchingEngine.findBestMatch(
+        guard let rediscovery = nearRecoveryMatch(transcription: transcription) ?? matchingEngine.findBestMatch(
             transcription: transcription,
             surahHint: surahHint,
             minimumScore: discoveryAcceptanceThreshold,

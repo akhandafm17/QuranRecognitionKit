@@ -150,11 +150,13 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         surahNumber: Int,
         minimumScore: Double? = nil,
         minimumVerse: Int? = nil,
+        maximumVerse: Int? = nil,
         exhaustiveSpanSearch: Bool = false
     ) -> VerseMatchCandidate? {
         let candidates = (surahLookup[surahNumber] ?? []).filter { entry in
-            guard let minimumVerse else { return true }
-            return entry.verseNumber >= minimumVerse
+            if let minimumVerse, entry.verseNumber < minimumVerse { return false }
+            if let maximumVerse, entry.verseNumber > maximumVerse { return false }
+            return true
         }
         guard !candidates.isEmpty else { return nil }
         return findBestMatch(
