@@ -206,10 +206,12 @@ final class RecitationTracker: @unchecked Sendable {
         // المفلحون", "ان الله سميع عليم", ...) that score highly against
         // verses hundreds of ayahs away. The reciter is near the loss point,
         // so a far commit needs distinctive, unambiguous evidence.
+        let isFarRecoveryCandidate: Bool
         if let recoverySurah,
            let recoveryMinimumVerse,
            match.surahNumber == recoverySurah,
            match.verseNumber > recoveryMinimumVerse + maximumImmediateRecoveryAdvance {
+            isFarRecoveryCandidate = true
             if let rejected = lastRejectedFarRecovery,
                rejected.surah == match.surahNumber,
                rejected.verse == match.verseNumber,
@@ -232,6 +234,8 @@ final class RecitationTracker: @unchecked Sendable {
                 )
                 return nil
             }
+        } else {
+            isFarRecoveryCandidate = false
         }
 
         let threshold = discoveryAcceptanceThreshold
@@ -252,6 +256,17 @@ final class RecitationTracker: @unchecked Sendable {
 
         debugLog("discovery pending \(match.surahNumber):\(match.verseNumber) consecutive=\(consecutiveCount)/\(requiredConsecutiveDiscovery)")
 
+        // A cross-surah commit after completing a surah is a big decision;
+        // a one- or two-word garble is never enough evidence for it
+        // (developer recording: 'قال إنعب' — garbled mid-Al-A'la audio —
+        // matched 37:89 at 0.68 and dragged the reader to As-Saffat).
+        if let completedSurahBeforeDiscovery,
+           match.surahNumber != completedSurahBeforeDiscovery,
+           ArabicNormalizer.words(transcription).count < 3 {
+            debugLog("post-completion switch evidence too short, waiting for clearer evidence")
+            return nil
+        }
+
         if isGenericPostCompletionOpening(match, transcription: transcription) {
             debugLog("post-completion opening is generic bismillah, waiting for clearer evidence")
             return nil
@@ -262,9 +277,14 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
-        let isImmediateHighConfidence = match.score >= immediateDiscoveryThreshold
+        // Far recovery commits never use single-window shortcuts: even a
+        // distinctive-looking window must repeat before the reader jumps
+        // many ayahs ahead of the loss point (Al-Baqarah replay: a single
+        // window dragged the reader from 2:40 to 2:144).
+        let isImmediateHighConfidence = match.score >= immediateDiscoveryThreshold && !isFarRecoveryCandidate
         let isImmediateHintedSurah = surahHint == match.surahNumber &&
-            match.score >= hintedImmediateDiscoveryThreshold
+            match.score >= hintedImmediateDiscoveryThreshold &&
+            !isFarRecoveryCandidate
         let isImmediatePostCompletionSurahSwitch = shouldCommitPostCompletionSwitch(match)
         guard consecutiveCount >= requiredConsecutiveDiscovery ||
                 isImmediateHighConfidence ||
@@ -341,12 +361,18 @@ final class RecitationTracker: @unchecked Sendable {
               surahHint == recoverySurah else {
             return nil
         }
+        // A one- or two-word garble can fuzzily land anywhere in the near
+        // window (developer Al-Kahf recording: 'كم أحدا' committed several
+        // ayahs ahead). Short windows may only recommit at the loss point
+        // or the ayah right after it; moving further needs real content.
+        let wordCount = ArabicNormalizer.words(transcription).count
+        let allowedAdvance = wordCount >= 3 ? maximumImmediateRecoveryAdvance : 1
         return matchingEngine.findBestMatchInSurah(
             transcription: transcription,
             surahNumber: recoverySurah,
             minimumScore: discoveryAcceptanceThreshold,
             minimumVerse: recoveryMinimumVerse,
-            maximumVerse: recoveryMinimumVerse + maximumImmediateRecoveryAdvance,
+            maximumVerse: recoveryMinimumVerse + allowedAdvance,
             exhaustiveSpanSearch: false
         )
     }
@@ -484,7 +510,24 @@ final class RecitationTracker: @unchecked Sendable {
             .map(evidenceStem)
             .filter { $0.count >= 3 && !bismillahStems.contains($0) }
 
-        return contentStems.isEmpty
+        guard !contentStems.isEmpty else { return true }
+
+        // Every surah's first ayah embeds the basmala, so a window whose
+        // non-basmala residue is garbage can score highly against any
+        // verse 1 (developer recording: a garbled basmala matched 69:1,
+        // whose own text is basmala-dominated). Require the residue to
+        // actually resemble the candidate's distinctive (post-basmala)
+        // content before treating the opening as specific.
+        let candidateContentStems = match.normalizedText
+            .split(separator: " ")
+            .map { evidenceStem(String($0)) }
+            .filter { $0.count >= 3 && !bismillahStems.contains($0) }
+        guard !candidateContentStems.isEmpty else { return true }
+
+        let residueMatchesCandidate = contentStems.contains { stem in
+            candidateContentStems.contains { LevenshteinMatcher.ratio(stem, $0) >= 0.72 }
+        }
+        return !residueMatchesCandidate
     }
 
     private func handleTrackingMatch(

@@ -27,8 +27,15 @@ private struct RecitationWindow: Decodable {
 }
 
 private struct ReplayOutcome {
-    var emissions: [(verse: RecognizedVerse, isRecoveryCommit: Bool)] = []
+    var emissions: [(verse: RecognizedVerse, isRecoveryCommit: Bool, t: Double)] = []
     var discoveryReturns = 0
+
+    /// Compact emission trace for diagnosing replay failures from CI output.
+    var trace: String {
+        emissions
+            .map { "\(String(format: "%.1f", $0.t))s \($0.verse.surahNumber):\($0.verse.verseNumber)\($0.isRecoveryCommit ? "R" : "")" }
+            .joined(separator: " | ")
+    }
 }
 
 private func loadFixture(_ name: String) throws -> [RecitationWindow] {
@@ -48,7 +55,7 @@ private func replay(fixture name: String, surahHint: Int) throws -> ReplayOutcom
         let text = tracker.mode == .tracking ? window.k : window.d
         guard !text.isEmpty else { continue }
         if let verse = tracker.processTranscription(text) {
-            outcome.emissions.append((verse, wasDiscovery))
+            outcome.emissions.append((verse, wasDiscovery, window.t))
         }
         switch tracker.mode {
         case .tracking:
@@ -74,7 +81,7 @@ private func expectOrderedFollowing(
 ) {
     var highestBySurah: [Int: Int] = [:]
     var surahIndex = 0
-    for (emission, isRecoveryCommit) in outcome.emissions {
+    for (emission, isRecoveryCommit, _) in outcome.emissions {
         guard let index = surahOrder.firstIndex(of: emission.surahNumber) else {
             Issue.record("left expected surahs at \(emission.surahNumber):\(emission.verseNumber)")
             continue
@@ -104,6 +111,7 @@ extension PerformanceSensitiveTests {
 
 @Test func realBaqarahRecitationIsFollowedSequentially() throws {
     let outcome = try replay(fixture: "baqarah_recitation_windows", surahHint: 2)
+    print("REPLAY TRACE baqarah: \(outcome.trace)")
     expectOrderedFollowing(outcome, surahOrder: [2])
 
     let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
@@ -124,6 +132,7 @@ extension PerformanceSensitiveTests {
 /// never reaches.
 @Test func developerRecordingShortSurahChainFollowsAcrossSurahs() throws {
     let outcome = try replay(fixture: "recording_chain_112_114", surahHint: 112)
+    print("REPLAY TRACE chain: \(outcome.trace)")
     expectOrderedFollowing(outcome, surahOrder: [112, 113, 114])
 
     let lastNas = outcome.emissions
@@ -138,6 +147,7 @@ extension PerformanceSensitiveTests {
 /// original field logs.
 @Test func developerRecordingAlAlaIsFollowedSequentially() throws {
     let outcome = try replay(fixture: "recording_alala_87", surahHint: 87)
+    print("REPLAY TRACE alala: \(outcome.trace)")
     expectOrderedFollowing(outcome, surahOrder: [87])
 
     let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
@@ -151,6 +161,7 @@ extension PerformanceSensitiveTests {
 /// input: long ayahs (17-19 run 30-50 words) plus deliberate repetition.
 @Test func developerRecordingMessyAlKahfNeverJumpsAndReachesTheEnd() throws {
     let outcome = try replay(fixture: "recording_kahf_18", surahHint: 18)
+    print("REPLAY TRACE kahf: \(outcome.trace)")
     expectOrderedFollowing(outcome, surahOrder: [18])
 
     let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
