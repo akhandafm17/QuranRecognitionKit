@@ -367,9 +367,9 @@ The SDK avoids main-thread inference and audio processing:
 
 Current validation:
 
-- `swift test` passes on macOS arm64 with 75 tests (several parameterized across multiple surahs). Run with `-c release` for realistic latency numbers; the replay test takes ~4 minutes.
+- `swift test` passes on macOS arm64 with 78 tests (several parameterized across multiple surahs). Run with `-c release` for realistic latency numbers; the replay tests take ~5 minutes.
 - The test suite covers hinted discovery, same-surah tracking, low-information noise, near-end recovery, post-completion surah switching, ambiguous candidate rejection, and audio-window quality analysis.
-- A real-recitation replay test (`RealRecitationReplayTests`) feeds 12 minutes of an actual Surah Al-Baqarah recitation (2:1-2:59) through the real tracker, using per-window decodes produced by the bundled ONNX model with the session's exact streaming window policy, and asserts sequential no-skip/no-regression following with bounded tracking losses.
+- Real-recitation replay tests (`RealRecitationReplayTests`) feed actual recordings through the real tracker, using per-window decodes produced by the bundled ONNX model with the session's exact streaming window policy, and assert sequential no-skip/no-regression following with bounded tracking losses. Fixtures cover 12 minutes of a studio Al-Baqarah recitation (2:1-2:59) plus phone-microphone recordings: a short-surah chain with transitions (Al-Ikhlas through An-Nas), Surah Al-A'la, and a memorization-style Al-Kahf 1-20 with repeated verses, coughing, and re-said words.
 - Scenario tests (`RecitationScenarioTests`) simulate full recitation sessions across structurally different surahs (Al-Fatihah, Al-Kahf, Al-Mulk, Al-Ikhlas, An-Nas) and recitation styles (clean per-ayah windows, rolling boundary-spanning windows, short fragments, noisy clipped decodes), asserting sequential no-skip/no-regression tracking and per-window latency bounds.
 - Generic iOS package builds pass with `xcodebuild -scheme QuranRecognitionKit-Package -destination 'generic/platform=iOS' build`.
 - App-side iOS generic builds passed with this package integrated.

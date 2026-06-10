@@ -488,9 +488,15 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         // Plain ratios bias short fragments toward shorter ayahs (a fragment of
         // a long ayah's opening can score higher against the short ayah after
         // it). Use partial-ratio scoring for any multi-word fragment so span
-        // resolution picks the ayah that actually contains the words.
+        // resolution picks the ayah that actually contains the words. The
+        // cheap pre-gate (> 0.15) is structurally unreachable when the
+        // reference dwarfs the query (a 15-char window against a 50-word
+        // Al-Kahf ayah plain-ratios near 0.07), so allow fragment scoring in
+        // that case too — otherwise every guard comparison goes blind on
+        // long ayahs.
         let wordCount = normalizedTranscription.split(separator: " ").count
-        if wordCount >= 2, normalizedTranscription.count >= 8, score > 0.15 {
+        let referenceDwarfsQuery = entry.normalizedText.count > normalizedTranscription.count * 3
+        if wordCount >= 2, normalizedTranscription.count >= 8, score > 0.15 || referenceDwarfsQuery {
             score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
         }
         return min(score, 1.0)

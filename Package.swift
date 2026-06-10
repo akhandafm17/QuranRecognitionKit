@@ -45,7 +45,10 @@ let package = Package(
             name: "QuranRecognitionKitTests",
             dependencies: ["QuranRecognitionKit"],
             resources: [
-                .process("Resources/baqarah_recitation_windows.json")
+                .process("Resources/baqarah_recitation_windows.json"),
+                .process("Resources/recording_chain_112_114.json"),
+                .process("Resources/recording_alala_87.json"),
+                .process("Resources/recording_kahf_18.json")
             ]
         )
     ]

@@ -2,15 +2,21 @@ import Foundation
 import Testing
 @testable import QuranRecognitionKit
 
-/// Replays a real Surah Al-Baqarah recitation (first 12 minutes, verses
-/// 2:1-2:59) through the real tracker. The fixture was produced by running
-/// the bundled ONNX model over the audio with the exact streaming window
-/// policy the session uses (0.2s cadence, 2.0s tracking / 3.5s discovery
-/// suffix windows over an 8s rolling buffer), so each row carries the decode
-/// the session would have processed in either mode at that timestamp.
+/// Replays real recitations through the real tracker. Each fixture was
+/// produced by running the bundled ONNX model over the audio with the exact
+/// streaming window policy the session uses (0.2s cadence, 2.0s tracking /
+/// 3.5s discovery suffix windows over an 8s rolling buffer), so each row
+/// carries the decode the session would have processed in either mode at
+/// that timestamp.
+///
+/// Fixtures: a 12-minute studio Al-Baqarah recitation (2:1-2:59) and three
+/// phone-microphone recordings by the app's developer — a short-surah chain
+/// with surah transitions (112 -> 113 -> 114), Surah Al-A'la, and a
+/// memorization-style Al-Kahf 1-20 with a verse repeated three times,
+/// coughing, and re-said words.
 ///
 /// This is the closest thing to an end-to-end field test that runs in CI:
-/// real reciter, real acoustic model output, real tracker.
+/// real reciters, real acoustic model output, real tracker.
 private struct RecitationWindow: Decodable {
     let t: Double
     /// Decode of the discovery-sized window at this timestamp ("" if the
@@ -20,74 +26,137 @@ private struct RecitationWindow: Decodable {
     let k: String
 }
 
-private func loadRecitationFixture() throws -> [RecitationWindow] {
-    let url = try #require(
-        Bundle.module.url(forResource: "baqarah_recitation_windows", withExtension: "json")
-    )
+private struct ReplayOutcome {
+    var emissions: [(verse: RecognizedVerse, isRecoveryCommit: Bool)] = []
+    var discoveryReturns = 0
+}
+
+private func loadFixture(_ name: String) throws -> [RecitationWindow] {
+    let url = try #require(Bundle.module.url(forResource: name, withExtension: "json"))
     return try JSONDecoder().decode([RecitationWindow].self, from: Data(contentsOf: url))
 }
 
-// Member of the serialized performance-sensitive suite: this replay is by
-// far the heaviest test and must not starve wall-clock latency assertions.
-extension PerformanceSensitiveTests {
-
-@Test func realBaqarahRecitationIsFollowedSequentially() throws {
+private func replay(fixture name: String, surahHint: Int) throws -> ReplayOutcome {
     let engine = try QuranVerseMatchingEngine.loadBundled()
-    let tracker = RecitationTracker(matchingEngine: engine, surahHint: 2)
-    let windows = try loadRecitationFixture()
+    let tracker = RecitationTracker(matchingEngine: engine, surahHint: surahHint)
+    let windows = try loadFixture(name)
 
-    var emissions: [(verse: RecognizedVerse, isRecoveryCommit: Bool)] = []
-    var discoveryReturns = 0
+    var outcome = ReplayOutcome()
     var wasTracking = false
-
     for window in windows {
         let wasDiscovery = tracker.mode == .discovery
         let text = tracker.mode == .tracking ? window.k : window.d
         guard !text.isEmpty else { continue }
         if let verse = tracker.processTranscription(text) {
-            emissions.append((verse, wasDiscovery))
+            outcome.emissions.append((verse, wasDiscovery))
         }
         switch tracker.mode {
         case .tracking:
             wasTracking = true
         case .discovery:
             if wasTracking {
-                discoveryReturns += 1
+                outcome.discoveryReturns += 1
                 wasTracking = false
             }
         }
     }
+    return outcome
+}
 
-    // The reciter covers 2:1 through 2:59 in this segment, strictly in order.
-    // Core guarantees: stay in Al-Baqarah, never move backwards, never skip
-    // more than one ayah per tracking emission, and actually keep up. A
-    // recovery commit right after a tracking loss may catch up by a few
-    // ayahs (the reciter kept going during the loss), bounded by the
-    // tracker's near-recovery window.
-    var highest = 0
-    for (emission, isRecoveryCommit) in emissions {
-        #expect(emission.surahNumber == 2, "left Al-Baqarah at \(emission.surahNumber):\(emission.verseNumber)")
+/// Core ordering guarantees over a replay: the reader never leaves the
+/// expected surah sequence, never moves backwards, and never skips more
+/// than one ayah per tracking emission. A recovery commit right after a
+/// tracking loss may catch up by a few ayahs (the reciter kept going during
+/// the loss), bounded by the tracker's near-recovery window.
+private func expectOrderedFollowing(
+    _ outcome: ReplayOutcome,
+    surahOrder: [Int]
+) {
+    var highestBySurah: [Int: Int] = [:]
+    var surahIndex = 0
+    for (emission, isRecoveryCommit) in outcome.emissions {
+        guard let index = surahOrder.firstIndex(of: emission.surahNumber) else {
+            Issue.record("left expected surahs at \(emission.surahNumber):\(emission.verseNumber)")
+            continue
+        }
+        #expect(index >= surahIndex, "went back to surah \(emission.surahNumber) after surah \(surahOrder[surahIndex])")
+        surahIndex = max(surahIndex, index)
+
+        let highest = highestBySurah[emission.surahNumber] ?? 0
         if highest > 0 {
-            #expect(emission.verseNumber >= highest, "moved backwards to \(emission.verseNumber) after \(highest)")
+            #expect(
+                emission.verseNumber >= highest,
+                "moved backwards to \(emission.surahNumber):\(emission.verseNumber) after verse \(highest)"
+            )
             let allowedStep = isRecoveryCommit ? 6 : 1
             #expect(
                 emission.verseNumber <= highest + allowedStep,
-                "skipped from \(highest) to \(emission.verseNumber) (recovery=\(isRecoveryCommit))"
+                "skipped from \(emission.surahNumber):\(highest) to \(emission.verseNumber) (recovery=\(isRecoveryCommit))"
             )
         }
-        highest = max(highest, emission.verseNumber)
+        highestBySurah[emission.surahNumber] = max(highest, emission.verseNumber)
     }
+}
 
+// Members of the serialized performance-sensitive suite: replays are the
+// heaviest tests and must not starve wall-clock latency assertions.
+extension PerformanceSensitiveTests {
+
+@Test func realBaqarahRecitationIsFollowedSequentially() throws {
+    let outcome = try replay(fixture: "baqarah_recitation_windows", surahHint: 2)
+    expectOrderedFollowing(outcome, surahOrder: [2])
+
+    let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
     #expect(highest >= 52, "only reached 2:\(highest) of 2:59 by the end of the segment")
     #expect(highest <= 61, "ran ahead to 2:\(highest), past the recited 2:59")
 
     // Loss-rate quality bar, set from measurement: this fixture currently
     // produces ~46 brief tracking losses over 12 minutes of long ayahs, all
-    // of which recover at the correct verse (the assertions above prove no
-    // skip/jump/regression ever escapes). The bound exists to catch
+    // of which recover at the correct verse (the ordering assertions prove
+    // no skip/jump/regression ever escapes). The bound exists to catch
     // regressions that meaningfully worsen loss behavior; ratchet it down
     // as decode quality and tracking improve.
-    #expect(discoveryReturns <= 60, "lost tracking \(discoveryReturns) times over the segment")
+    #expect(outcome.discoveryReturns <= 60, "lost tracking \(outcome.discoveryReturns) times over the segment")
+}
+
+/// Developer phone recording: Al-Ikhlas -> Al-Falaq -> An-Nas recited
+/// continuously. Exercises surah transitions, which the Al-Baqarah fixture
+/// never reaches.
+@Test func developerRecordingShortSurahChainFollowsAcrossSurahs() throws {
+    let outcome = try replay(fixture: "recording_chain_112_114", surahHint: 112)
+    expectOrderedFollowing(outcome, surahOrder: [112, 113, 114])
+
+    let lastNas = outcome.emissions
+        .filter { $0.verse.surahNumber == 114 }
+        .map(\.verse.verseNumber)
+        .max() ?? 0
+    #expect(lastNas >= 4, "never followed into An-Nas past 114:\(lastNas)")
+    #expect(outcome.discoveryReturns <= 10, "lost tracking \(outcome.discoveryReturns) times in a 47s chain")
+}
+
+/// Developer phone recording: Surah Al-A'la (87), the surah from the
+/// original field logs.
+@Test func developerRecordingAlAlaIsFollowedSequentially() throws {
+    let outcome = try replay(fixture: "recording_alala_87", surahHint: 87)
+    expectOrderedFollowing(outcome, surahOrder: [87])
+
+    let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
+    #expect(highest >= 15, "only reached 87:\(highest) of the recited 87:17+")
+    #expect(highest <= 19, "ran ahead to 87:\(highest)")
+    #expect(outcome.discoveryReturns <= 12, "lost tracking \(outcome.discoveryReturns) times in a 57s recitation")
+}
+
+/// Developer phone recording: Al-Kahf 1-20 memorization-style — verse 3
+/// recited three times, coughing, and words re-said. The messiest realistic
+/// input: long ayahs (17-19 run 30-50 words) plus deliberate repetition.
+@Test func developerRecordingMessyAlKahfNeverJumpsAndReachesTheEnd() throws {
+    let outcome = try replay(fixture: "recording_kahf_18", surahHint: 18)
+    expectOrderedFollowing(outcome, surahOrder: [18])
+
+    let highest = outcome.emissions.map(\.verse.verseNumber).max() ?? 0
+    #expect(highest >= 17, "only reached 18:\(highest) of the recited 18:20")
+    #expect(highest <= 21, "ran ahead to 18:\(highest)")
+    #expect(outcome.discoveryReturns <= 45, "lost tracking \(outcome.discoveryReturns) times over 4 minutes")
 }
 
 }
