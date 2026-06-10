@@ -454,10 +454,18 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         // for much shorter fragments so they match the current verse instead of
         // accumulating tracking misses.
         let scopedQueryWordCount = normalizedTranscription.split(separator: " ").count
+        // The cheap pre-gate (plain ratio > 0.2) can never be met by a short
+        // window against a long ayah: a 15-char decode against a 200-char
+        // Al-Baqarah verse caps out around 0.1 by length alone, so mid-verse
+        // windows of long ayahs were structurally unable to match and piled
+        // up tracking misses. Allow fragment scoring whenever the reference
+        // is much longer than the query — exactly the case where the plain
+        // ratio is meaningless.
+        let referenceDwarfsQuery = entry.normalizedText.count > normalizedTranscription.count * 3
         let shouldUseScopedFragment = (currentSurah != nil || currentVerse != nil) &&
             scopedQueryWordCount >= 2 &&
             normalizedTranscription.count >= 8 &&
-            score > 0.2
+            (score > 0.2 || referenceDwarfsQuery)
         let shouldUseDiscoveryFragment = normalizedTranscription.count >= 20 &&
             score > 0.25 &&
             shouldUseEntryFragmentScore(

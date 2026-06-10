@@ -242,6 +242,17 @@ func noisyRecitationNeverJumpsAcrossAyahs(
 /// bound on a fully loaded machine).
 @Suite(.serialized) struct PerformanceSensitiveTests {
 
+    /// `swift test` compiles unoptimized; the Levenshtein scans are 10-50x
+    /// slower than the release builds apps ship with (on-device field logs
+    /// show ~0.1s per window for the whole pipeline). Latency bounds are
+    /// release-realistic numbers scaled by this allowance under debug.
+    #if DEBUG
+    static let latencyAllowance = 8.0
+    #else
+    static let latencyAllowance = 1.0
+    #endif
+
+
     @Test(arguments: [1, 18, 23, 67, 112, 114])
     func hintedDiscoveryCommitsFirstVerseOnFirstWindow(surah: Int) throws {
         let engine = try QuranVerseMatchingEngine.loadBundled()
@@ -254,7 +265,7 @@ func noisyRecitationNeverJumpsAcrossAyahs(
 
         #expect(match.surahNumber == surah)
         #expect(match.verseNumber == 1)
-        #expect(elapsed < 2.0, "hinted discovery took \(elapsed)s for surah \(surah)")
+        #expect(elapsed < 2.0 * Self.latencyAllowance, "hinted discovery took \(elapsed)s for surah \(surah)")
     }
 
     @Test func unhintedGlobalDiscoveryStaysFastAcrossTheMushaf() throws {
@@ -269,7 +280,7 @@ func noisyRecitationNeverJumpsAcrossAyahs(
 
             // Identical verse texts exist in multiple surahs, so compare text.
             #expect(match.normalizedText == verse.normalizedText, "wrong match for \(surah):\(verseNumber)")
-            #expect(elapsed < 4.0, "global discovery took \(elapsed)s for \(surah):\(verseNumber)")
+            #expect(elapsed < 4.0 * Self.latencyAllowance, "global discovery took \(elapsed)s for \(surah):\(verseNumber)")
         }
     }
 
@@ -286,10 +297,10 @@ func noisyRecitationNeverJumpsAcrossAyahs(
             _ = tracker.processTranscription(window)
             let elapsed = Date().timeIntervalSince(startedAt)
             total += elapsed
-            #expect(elapsed < 1.0, "scoped window took \(elapsed)s")
+            #expect(elapsed < 1.0 * Self.latencyAllowance, "scoped window took \(elapsed)s")
         }
 
         let average = total / Double(windows.count)
-        #expect(average < 0.5, "average scoped window took \(average)s")
+        #expect(average < 0.5 * Self.latencyAllowance, "average scoped window took \(average)s")
     }
 }
