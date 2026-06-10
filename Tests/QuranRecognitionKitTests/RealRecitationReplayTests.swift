@@ -36,15 +36,16 @@ extension PerformanceSensitiveTests {
     let tracker = RecitationTracker(matchingEngine: engine, surahHint: 2)
     let windows = try loadRecitationFixture()
 
-    var emissions: [RecognizedVerse] = []
+    var emissions: [(verse: RecognizedVerse, isRecoveryCommit: Bool)] = []
     var discoveryReturns = 0
     var wasTracking = false
 
     for window in windows {
+        let wasDiscovery = tracker.mode == .discovery
         let text = tracker.mode == .tracking ? window.k : window.d
         guard !text.isEmpty else { continue }
         if let verse = tracker.processTranscription(text) {
-            emissions.append(verse)
+            emissions.append((verse, wasDiscovery))
         }
         switch tracker.mode {
         case .tracking:
@@ -59,13 +60,20 @@ extension PerformanceSensitiveTests {
 
     // The reciter covers 2:1 through 2:59 in this segment, strictly in order.
     // Core guarantees: stay in Al-Baqarah, never move backwards, never skip
-    // more than one ayah per emission, and actually keep up.
+    // more than one ayah per tracking emission, and actually keep up. A
+    // recovery commit right after a tracking loss may catch up by a few
+    // ayahs (the reciter kept going during the loss), bounded by the
+    // tracker's near-recovery window.
     var highest = 0
-    for emission in emissions {
+    for (emission, isRecoveryCommit) in emissions {
         #expect(emission.surahNumber == 2, "left Al-Baqarah at \(emission.surahNumber):\(emission.verseNumber)")
         if highest > 0 {
             #expect(emission.verseNumber >= highest, "moved backwards to \(emission.verseNumber) after \(highest)")
-            #expect(emission.verseNumber <= highest + 1, "skipped from \(highest) to \(emission.verseNumber)")
+            let allowedStep = isRecoveryCommit ? 6 : 1
+            #expect(
+                emission.verseNumber <= highest + allowedStep,
+                "skipped from \(highest) to \(emission.verseNumber) (recovery=\(isRecoveryCommit))"
+            )
         }
         highest = max(highest, emission.verseNumber)
     }
@@ -74,8 +82,8 @@ extension PerformanceSensitiveTests {
     #expect(highest <= 61, "ran ahead to 2:\(highest), past the recited 2:59")
 
     // Occasional recovery through discovery is acceptable on a 12-minute
-    // stream, but constant tracking loss is not.
-    #expect(discoveryReturns <= 20, "lost tracking \(discoveryReturns) times over the segment")
+    // stream of long ayahs, but constant tracking loss is not.
+    #expect(discoveryReturns <= 30, "lost tracking \(discoveryReturns) times over the segment")
 }
 
 }

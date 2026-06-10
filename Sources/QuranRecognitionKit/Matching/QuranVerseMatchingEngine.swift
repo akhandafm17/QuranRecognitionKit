@@ -726,6 +726,13 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         guard queryWords.count >= 2, referenceWords.count >= 2 else { return 0 }
 
         let full = LevenshteinMatcher.ratio(transcription, reference)
+        // Partial-ratio sliding exists for SHORT fragments inside longer
+        // references. When both sides are long (e.g. a full-verse discovery
+        // window against a multi-ayah span) it costs O(slides * n^2) and a
+        // long query is no longer a "fragment" — the plain ratio is the
+        // right measure. Without this cap, global discovery of a long ayah
+        // like 2:255 spends minutes inside partialRatio.
+        guard min(transcription.count, reference.count) <= 100 else { return full }
         let partial = LevenshteinMatcher.partialRatio(transcription, reference)
         guard partial > full else { return full }
 

@@ -38,6 +38,7 @@ final class RecitationTracker: @unchecked Sendable {
     /// distinctiveness check, so persisting audio does not re-pay the
     /// whole-mushaf ambiguity scan on every overlapping window.
     private var lastRejectedFarRecovery: (surah: Int, verse: Int, score: Double)?
+    private var crossSurahAlternativeCache: (key: String, result: Bool)?
 
     private let requiredConsecutiveDiscovery = 2
     private let requiredConsecutiveJump = 2
@@ -1176,16 +1177,27 @@ final class RecitationTracker: @unchecked Sendable {
         transcription: String,
         localMatch: QuranVerseMatchingEngine.VerseMatchCandidate
     ) -> Bool {
-        guard let currentSurah,
-              let globalMatch = matchingEngine.findBestMatch(
-                transcription: transcription,
-                minimumScore: localMatch.score + 0.08,
-                exhaustiveSpanSearch: true
-              ) else {
-            return false
+        guard let currentSurah else { return false }
+
+        // This guard runs on many overlapping windows that often carry the
+        // same decode; cache the last verdict. The global check itself stays
+        // non-exhaustive: a full global span search per tracking window is
+        // far too expensive for a tie-break heuristic (it dominated replay
+        // runtime) and single-verse global matches already catch the
+        // realistic cross-surah confusions.
+        let cacheKey = "\(currentSurah)|\(String(format: "%.2f", localMatch.score))|\(transcription)"
+        if let cached = crossSurahAlternativeCache, cached.key == cacheKey {
+            return cached.result
         }
 
-        return globalMatch.surahNumber != currentSurah
+        let globalMatch = matchingEngine.findBestMatch(
+            transcription: transcription,
+            minimumScore: localMatch.score + 0.08,
+            exhaustiveSpanSearch: false
+        )
+        let result = globalMatch.map { $0.surahNumber != currentSurah } ?? false
+        crossSurahAlternativeCache = (cacheKey, result)
+        return result
     }
 
     private func hasUsefulContinuationContent(_ transcription: String) -> Bool {
@@ -1403,9 +1415,15 @@ final class RecitationTracker: @unchecked Sendable {
         let lostVerse = currentVerse
         let wasAtEndOfSurah = isAtEndOfSurah(surah: lostSurah, verse: lostVerse)
         let shouldAssumeCompletedSurah = wasAtEndOfSurah || isNearEndOfSurah(surah: lostSurah, verse: lostVerse)
+        // Long ayahs take 15-40 seconds to recite and routinely produce
+        // short garbled stretches mid-verse; four bad windows (~1s) must not
+        // abandon a 30-word ayah. Scale the tolerance with the ayah's length
+        // (Al-Baqarah replay: a fixed limit of 4 caused 65 losses in 12
+        // minutes, nearly all mid-long-verse).
+        let lengthScaledMisses = min(10, max(maximumMissedTrackingCount, totalWordsInVerse / 3))
         let maximumMisses = wasAtEndOfSurah
             ? maximumMissedTrackingCountAfterCompletedSurah
-            : maximumMissedTrackingCount
+            : lengthScaledMisses
 
         missedTrackingCount += 1
         lowInformationTrackingCount = 0
