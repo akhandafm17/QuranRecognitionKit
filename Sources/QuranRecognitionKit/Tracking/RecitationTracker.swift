@@ -71,7 +71,11 @@ final class RecitationTracker: @unchecked Sendable {
     private let postCompletionOpeningImmediateThreshold = 0.80
     private let immediateDiscoveryThreshold = 0.85
     private let immediateContinuationThreshold = 0.55
-    private let probableImmediateContinuationThreshold = 0.60
+    // Entry gate only: the bonus-free guard stack (absolute floor, dominance
+    // margin, previous-ayah staleness, distinct-word evidence) does the real
+    // filtering, so this matches the span path's gate. Bonus-inflated scores
+    // carry +0.22, so 0.55 admits candidates with base scores from ~0.33.
+    private let probableImmediateContinuationThreshold = 0.55
     private let probableSpanContinuationThreshold = 0.54
     private let trackingGlobalSwitchThreshold = 0.82
     private let trackingGlobalSwitchMargin = 0.18
