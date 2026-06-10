@@ -255,10 +255,18 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
                 continue
             }
 
-            let score = scoreEntryDirect(
-                normalizedTranscription: normalizedTranscription,
-                entry: entry
-            )
+            // Resolving among the span's few contained verses must always use
+            // fragment scoring for multi-word fragments: the cheap plain
+            // ratio is length-biased toward the shortest contained ayah, and
+            // the usual scan gates (length, minimum score) don't apply when
+            // picking between two or three candidates.
+            var score = LevenshteinMatcher.ratio(normalizedTranscription, entry.normalizedText)
+            if normalizedTranscription.split(separator: " ").count >= 2 {
+                score = max(
+                    score,
+                    fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText)
+                )
+            }
             if score > bestScore {
                 bestScore = score
                 bestEntry = entry
@@ -472,10 +480,7 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
         // it). Use partial-ratio scoring for any multi-word fragment so span
         // resolution picks the ayah that actually contains the words.
         let wordCount = normalizedTranscription.split(separator: " ").count
-        // Keep the character gate low (6): tracker guards compare short
-        // decodes like "ان يعلم" (7 chars) against long current ayahs, and the
-        // plain-ratio fallback wrongly favors shorter forward ayahs for them.
-        if wordCount >= 2, normalizedTranscription.count >= 6, score > 0.15 {
+        if wordCount >= 2, normalizedTranscription.count >= 8, score > 0.15 {
             score = max(score, fragmentScore(transcription: normalizedTranscription, reference: entry.normalizedText))
         }
         return min(score, 1.0)
@@ -484,11 +489,19 @@ public final class QuranVerseMatchingEngine: @unchecked Sendable {
     /// Scores a transcription directly against one specific verse, without
     /// continuation bonuses. Used by the tracker to check whether the current
     /// ayah explains a window at least as well as a proposed continuation.
+    /// Unlike span resolution, guard comparisons also fragment-score very
+    /// short two-word decodes like "ان يعلم" (7 chars), because the plain
+    /// ratio fallback wrongly favors shorter forward ayahs for them.
     func directVerseScore(transcription: String, surah: Int, verse: Int) -> Double {
         guard let entry = getVerse(surah: surah, verse: verse) else { return 0 }
         let normalized = ArabicNormalizer.normalize(transcription)
         guard !normalized.isEmpty else { return 0 }
-        return scoreEntryDirect(normalizedTranscription: normalized, entry: entry)
+        var score = scoreEntryDirect(normalizedTranscription: normalized, entry: entry)
+        let wordCount = normalized.split(separator: " ").count
+        if wordCount >= 2, normalized.count >= 6, normalized.count < 8, score > 0.15 {
+            score = max(score, fragmentScore(transcription: normalized, reference: entry.normalizedText))
+        }
+        return min(score, 1.0)
     }
 
     private func spanStartEntries(

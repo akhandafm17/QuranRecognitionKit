@@ -772,6 +772,10 @@ private func driveTracker(
     #expect(tracker.currentVerse == 10)
 }
 
+// Member of the serialized performance-sensitive suite: the global ambiguity
+// scans here are heavy enough to distort parallel latency measurements.
+extension PerformanceSensitiveTests {
+
 @Test func recoveryAfterLossInLongSurahDoesNotCommitFarAheadOnGenericPhrases() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine, surahHint: 2)
@@ -805,6 +809,8 @@ private func driveTracker(
     #expect(tracker.currentSurah == 2)
     let recovered = try #require(tracker.currentVerse)
     #expect((4...6).contains(recovered), "recovered at 2:\(recovered) instead of near 2:4")
+}
+
 }
 
 @Test func noisyNextAyahEvidenceStillAdvancesPromptlyFromLog() throws {

@@ -44,6 +44,12 @@ final class RecitationTracker: @unchecked Sendable {
     private let maximumImmediateRecoveryAdvance = 6
     private let farRecoveryScoreThreshold = 0.75
     private let farRecoveryAmbiguityTolerance = 0.08
+    /// Weak-evidence advances (noisy continuation, forward-span fallback)
+    /// must be backed by a bonus-free direct score against the forward ayah
+    /// of at least this much. Below it, the window is garbage that happens to
+    /// rank candidates by chance (Al-Baqarah replay: garbage windows scored
+    /// 0.25-0.30 against everything and still advanced on relative margins).
+    private let weakAdvanceDirectScoreFloor = 0.32
     private let postCompletionDiscoveryThreshold = 0.60
     private let postCompletionOpeningImmediateThreshold = 0.80
     private let immediateDiscoveryThreshold = 0.85
@@ -517,15 +523,32 @@ final class RecitationTracker: @unchecked Sendable {
                         verse: effectiveMatch.verseNumber
                     )
                 )
+                let cuedVerseText = matchingEngine
+                    .getVerse(surah: currentSurah, verse: currentVerse + 1)?
+                    .normalizedText ?? ""
+                let currentVerseText = matchingEngine
+                    .getVerse(surah: currentSurah, verse: currentVerse)?
+                    .normalizedText ?? ""
+                // The forward ayah must clearly explain the window better
+                // than the current one (margin), or the window must carry a
+                // word that belongs to the cued ayah and not the current one.
+                let hasMargin = currentVerseScore + 0.05 < forwardVerseScore
+                let hasDistinctWord = !cuedVerseText.isEmpty && hasDistinctTargetWordEvidence(
+                    transcription: transcription,
+                    targetText: cuedVerseText,
+                    currentText: currentVerseText
+                )
                 if match.verseNumber <= currentVerse + 1,
                    effectiveMatch.score >= probableSpanContinuationThreshold,
                    hasUsefulContinuationContent(transcription),
-                   currentVerseScore + 0.05 < forwardVerseScore,
+                   forwardVerseScore >= weakAdvanceDirectScoreFloor,
+                   hasMargin || hasDistinctWord,
                    !isStalePreviousAyahAudio(
                        transcription: transcription,
                        currentSurah: currentSurah,
                        currentVerse: currentVerse,
-                       forwardScore: forwardVerseScore
+                       forwardScore: forwardVerseScore,
+                       targetText: cuedVerseText
                    ),
                    !hasStrongerCrossSurahAlternative(transcription: transcription, localMatch: effectiveMatch) {
                     resetLowConfidenceContinuation()
@@ -983,7 +1006,24 @@ final class RecitationTracker: @unchecked Sendable {
                 surah: match.surahNumber,
                 verse: match.verseNumber
             )
-            if currentVerseScore + 0.05 >= targetVerseScore {
+            let currentVerseText = matchingEngine
+                .getVerse(surah: currentSurah, verse: currentVerse)?
+                .normalizedText ?? ""
+            let targetVerseText = matchingEngine
+                .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
+                .normalizedText ?? ""
+            if targetVerseScore < weakAdvanceDirectScoreFloor {
+                debugLog(
+                    "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because target ayah does not explain window (target=\(String(format: "%.3f", targetVerseScore)))"
+                )
+                return false
+            }
+            let hasDistinctWord = !targetVerseText.isEmpty && hasDistinctTargetWordEvidence(
+                transcription: transcription,
+                targetText: targetVerseText,
+                currentText: currentVerseText
+            )
+            if currentVerseScore + 0.05 >= targetVerseScore, !hasDistinctWord {
                 debugLog(
                     "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because current ayah explains window (current=\(String(format: "%.3f", currentVerseScore)) target=\(String(format: "%.3f", targetVerseScore)))"
                 )
@@ -993,7 +1033,8 @@ final class RecitationTracker: @unchecked Sendable {
                 transcription: transcription,
                 currentSurah: currentSurah,
                 currentVerse: currentVerse,
-                forwardScore: targetVerseScore
+                forwardScore: targetVerseScore,
+                targetText: targetVerseText
             ) {
                 debugLog(
                     "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because window matches previous ayah better"
@@ -1024,15 +1065,51 @@ final class RecitationTracker: @unchecked Sendable {
         transcription: String,
         currentSurah: Int,
         currentVerse: Int,
-        forwardScore: Double
+        forwardScore: Double,
+        targetText: String?
     ) -> Bool {
-        guard currentVerse > 1 else { return false }
+        guard currentVerse > 1,
+              let previousEntry = matchingEngine.getVerse(surah: currentSurah, verse: currentVerse - 1) else {
+            return false
+        }
+        // When the previous ayah textually contains the target's content
+        // (e.g. Al-Fatihah's بسم الله الرحمن الرحيم contains الرحمن الرحيم),
+        // a higher previous-ayah score is expected and proves nothing about
+        // staleness; locality favors forward movement there.
+        if let targetText,
+           !targetText.isEmpty,
+           LevenshteinMatcher.partialRatio(targetText, previousEntry.normalizedText) >= 0.85 {
+            return false
+        }
         let previousVerseScore = matchingEngine.directVerseScore(
             transcription: transcription,
             surah: currentSurah,
             verse: currentVerse - 1
         )
         return previousVerseScore > forwardScore + 0.05
+    }
+
+    /// True when the window contains a word that clearly belongs to the
+    /// target ayah and not to the current one (fuzzy match, because Quranic
+    /// orthography differs from decoder output: العالمين vs العلمين).
+    private func hasDistinctTargetWordEvidence(
+        transcription: String,
+        targetText: String,
+        currentText: String
+    ) -> Bool {
+        let transcribedWords = ArabicNormalizer.words(transcription)
+        guard !transcribedWords.isEmpty else { return false }
+        let currentWords = currentText.split(separator: " ").map(String.init)
+
+        for targetWord in targetText.split(separator: " ").map(String.init) where targetWord.count >= 4 {
+            let inWindow = transcribedWords.contains { LevenshteinMatcher.ratio($0, targetWord) >= 0.85 }
+            guard inWindow else { continue }
+            let inCurrent = currentWords.contains { LevenshteinMatcher.ratio($0, targetWord) >= 0.85 }
+            if !inCurrent {
+                return true
+            }
+        }
+        return false
     }
 
     private func hasStrongerCrossSurahAlternative(

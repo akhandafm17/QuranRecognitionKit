@@ -27,6 +27,10 @@ private func loadRecitationFixture() throws -> [RecitationWindow] {
     return try JSONDecoder().decode([RecitationWindow].self, from: Data(contentsOf: url))
 }
 
+// Member of the serialized performance-sensitive suite: this replay is by
+// far the heaviest test and must not starve wall-clock latency assertions.
+extension PerformanceSensitiveTests {
+
 @Test func realBaqarahRecitationIsFollowedSequentially() throws {
     let engine = try QuranVerseMatchingEngine.loadBundled()
     let tracker = RecitationTracker(matchingEngine: engine, surahHint: 2)
@@ -72,4 +76,6 @@ private func loadRecitationFixture() throws -> [RecitationWindow] {
     // Occasional recovery through discovery is acceptable on a 12-minute
     // stream, but constant tracking loss is not.
     #expect(discoveryReturns <= 20, "lost tracking \(discoveryReturns) times over the segment")
+}
+
 }
