@@ -1420,31 +1420,7 @@ final class RecitationTracker: @unchecked Sendable {
         // abandon a 30-word ayah. Scale the tolerance with the ayah's length
         // (Al-Baqarah replay: a fixed limit of 4 caused 65 losses in 12
         // minutes, nearly all mid-long-verse).
-        var lengthScaledMisses = min(10, max(maximumMissedTrackingCount, totalWordsInVerse / 3))
-
-        // When the garbled window still weakly resembles the current or next
-        // ayah, the audio is junk from the verse being recited — not
-        // evidence that the reciter moved elsewhere. Tolerate a longer
-        // streak before abandoning tracking (still bounded, so a genuine
-        // departure triggers rediscovery within a few seconds).
-        if let currentSurah, let currentVerse {
-            let resemblance = max(
-                matchingEngine.directVerseScore(
-                    transcription: transcription,
-                    surah: currentSurah,
-                    verse: currentVerse
-                ),
-                matchingEngine.directVerseScore(
-                    transcription: transcription,
-                    surah: currentSurah,
-                    verse: currentVerse + 1
-                )
-            )
-            if resemblance >= 0.28 {
-                lengthScaledMisses = min(18, lengthScaledMisses * 2)
-            }
-        }
-
+        let lengthScaledMisses = min(10, max(maximumMissedTrackingCount, totalWordsInVerse / 3))
         let maximumMisses = wasAtEndOfSurah
             ? maximumMissedTrackingCountAfterCompletedSurah
             : lengthScaledMisses
