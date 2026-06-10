@@ -54,6 +54,19 @@ final class RecitationTracker: @unchecked Sendable {
     /// rank candidates by chance (Al-Baqarah replay: garbage windows scored
     /// 0.25-0.30 against everything and still advanced on relative margins).
     private let weakAdvanceDirectScoreFloor = 0.32
+    /// Heavily garbled but real next-ayah audio can score just below the
+    /// floor (Al-Fatihah log: 'قل وإن عنك مست' vs اياك نعبد واياك نستعين).
+    /// Allow slightly weaker forward scores when they dominate the current
+    /// ayah by a wide margin — garbage scores low against everything, so it
+    /// never dominates by this much.
+    private let weakAdvanceRelaxedFloor = 0.28
+    private let weakAdvanceDominanceMargin = 0.15
+
+    private func clearsWeakAdvanceFloor(forwardScore: Double, currentScore: Double) -> Bool {
+        if forwardScore >= weakAdvanceDirectScoreFloor { return true }
+        return forwardScore >= weakAdvanceRelaxedFloor &&
+            forwardScore >= currentScore + weakAdvanceDominanceMargin
+    }
     private let postCompletionDiscoveryThreshold = 0.60
     private let postCompletionOpeningImmediateThreshold = 0.80
     private let immediateDiscoveryThreshold = 0.85
@@ -583,7 +596,7 @@ final class RecitationTracker: @unchecked Sendable {
                 if match.verseNumber <= currentVerse + 1,
                    effectiveMatch.score >= probableSpanContinuationThreshold,
                    hasUsefulContinuationContent(transcription),
-                   forwardVerseScore >= weakAdvanceDirectScoreFloor,
+                   clearsWeakAdvanceFloor(forwardScore: forwardVerseScore, currentScore: currentVerseScore),
                    hasMargin || hasDistinctWord,
                    !isStalePreviousAyahAudio(
                        transcription: transcription,
@@ -1055,7 +1068,7 @@ final class RecitationTracker: @unchecked Sendable {
             let targetVerseText = matchingEngine
                 .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
                 .normalizedText ?? ""
-            if targetVerseScore < weakAdvanceDirectScoreFloor {
+            if !clearsWeakAdvanceFloor(forwardScore: targetVerseScore, currentScore: currentVerseScore) {
                 debugLog(
                     "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) because target ayah does not explain window (target=\(String(format: "%.3f", targetVerseScore)))"
                 )
