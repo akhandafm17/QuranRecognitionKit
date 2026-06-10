@@ -48,7 +48,11 @@ final class RecitationTracker: @unchecked Sendable {
     /// coverage, ending word, or a same-verse match) is required before the
     /// next weak advance.
     private var consecutiveWeakAdvances = 0
-    private let maximumConsecutiveWeakAdvances = 3
+    private let maximumConsecutiveWeakAdvances = 5
+    /// The window currently being processed; used to seed word coverage on
+    /// arrival at a new verse so garbage-driven advances start at zero.
+    private var currentWindowTranscription = ""
+
 
     private let requiredConsecutiveDiscovery = 2
     private let requiredConsecutiveJump = 2
@@ -127,6 +131,7 @@ final class RecitationTracker: @unchecked Sendable {
     }
 
     func processTranscription(_ transcription: String) -> RecognizedVerse? {
+        currentWindowTranscription = transcription
         debugLog("process mode=\(mode) hint=\(surahHint.map(String.init) ?? "nil") completedSurah=\(completedSurahBeforeDiscovery.map(String.init) ?? "nil") text='\(transcription)'")
         let match: QuranVerseMatchingEngine.VerseMatchCandidate?
 
@@ -342,11 +347,16 @@ final class RecitationTracker: @unchecked Sendable {
         recoverySurah = nil
         lastRejectedFarRecovery = nil
         recoveryMinimumVerse = nil
-        wordsCovered = 0
-        totalWordsInVerse = matchingEngine
-            .getVerse(surah: match.surahNumber, verse: match.verseNumber)?
-            .normalizedWords
-            .count ?? 0
+        let committedEntry = matchingEngine.getVerse(surah: match.surahNumber, verse: match.verseNumber)
+        if let committedEntry {
+            wordsCovered = LevenshteinMatcher.wordAlignment(
+                transcription: transcription,
+                reference: committedEntry.normalizedText
+            ).matched
+        } else {
+            wordsCovered = 0
+        }
+        totalWordsInVerse = committedEntry?.normalizedWords.count ?? 0
         mode = .tracking
         debugLog("discovery committed \(match.surahNumber):\(match.verseNumber), switching to tracking")
 
@@ -674,6 +684,7 @@ final class RecitationTracker: @unchecked Sendable {
                 if match.verseNumber <= currentVerse + 1,
                    effectiveMatch.score >= probableSpanContinuationThreshold,
                    hasUsefulContinuationContent(transcription),
+                   wordsCovered > 0,
                    consecutiveWeakAdvances < maximumConsecutiveWeakAdvances,
                    clearsWeakAdvanceFloor(forwardScore: forwardVerseScore, currentScore: currentVerseScore),
                    hasMargin || hasDistinctWord,
@@ -1137,6 +1148,16 @@ final class RecitationTracker: @unchecked Sendable {
     ) -> Bool {
         guard match.score >= threshold,
               hasUsefulContinuationContent(transcription) else {
+            return false
+        }
+
+        // Never leave a verse the reader was never confirmed to be on:
+        // phantom advances seed zero coverage, so requiring observed
+        // coverage stops garbage windows from chaining weak advances.
+        guard wordsCovered > 0 else {
+            debugLog(
+                "rejecting noisy continuation \(match.surahNumber):\(match.verseNumber) with no observed coverage of current ayah"
+            )
             return false
         }
 
@@ -1650,6 +1671,16 @@ final class RecitationTracker: @unchecked Sendable {
             return nil
         }
 
+        // Never cue past a verse the reader was never confirmed to be on:
+        // ending stems are short and generic (consecutive Al-Baqarah ayahs
+        // all end in ...ون), so garbage windows can chain phantom ending
+        // advances through verses with zero observed coverage (replay trace:
+        // 2:60 -> 2:67 in six seconds on tail audio).
+        guard wordsCovered > 0 else {
+            debugLog("ignoring ending stem for \(currentSurah):\(currentVerse) with no observed coverage")
+            return nil
+        }
+
         // Adjacent ayahs can share stems (e.g. أصبحت in one ayah and مصبحين
         // ending the next). When the window still matches the previous ayah
         // clearly better than the current one, the ending-stem hit is stale
@@ -1796,9 +1827,13 @@ final class RecitationTracker: @unchecked Sendable {
         resetLowConfidenceContinuation()
         missedTrackingCount = 0
         lowInformationTrackingCount = 0
-        wordsCovered = 0
+        let seed = LevenshteinMatcher.wordAlignment(
+            transcription: currentWindowTranscription,
+            reference: entry.normalizedText
+        )
+        wordsCovered = seed.matched
         totalWordsInVerse = entry.normalizedWords.count
-        debugLog("advanced to \(entry.surahNumber):\(entry.verseNumber)")
+        debugLog("advanced to \(entry.surahNumber):\(entry.verseNumber) seedCoverage=\(seed.matched)/\(entry.normalizedWords.count)")
         return RecognizedVerse(
             surahNumber: entry.surahNumber,
             verseNumber: entry.verseNumber,
